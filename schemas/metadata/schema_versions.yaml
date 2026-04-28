@@ -1,0 +1,48 @@
+table_id: schema_versions
+table_name: Schema Versions
+layer: metadata
+version: v001
+description: Schema version metadata for each dataset.
+primary_key:
+  - schema_version_id
+fields:
+  - name: schema_version_id
+    type: text
+    nullable: false
+    primary_key: true
+    description: Schema version id.
+  - name: dataset_id
+    type: text
+    nullable: false
+    primary_key: false
+    description: Referenced dataset id.
+  - name: version
+    type: text
+    nullable: false
+    primary_key: false
+    description: Human-readable version.
+  - name: schema_file_path
+    type: text
+    nullable: true
+    primary_key: false
+    description: Git-managed schema file path.
+  - name: schema_hash
+    type: text
+    nullable: true
+    primary_key: false
+    description: Schema file or field-definition hash.
+  - name: status
+    type: text
+    nullable: false
+    primary_key: false
+    description: active or deprecated.
+  - name: created_at
+    type: text
+    nullable: false
+    primary_key: false
+    description: Creation timestamp.
+  - name: change_summary
+    type: text
+    nullable: true
+    primary_key: false
+    description: Description of schema changes.

@@ -1,0 +1,10 @@
+storage:
+  data_root: ./data
+  raw_root: ${storage.data_root}/raw
+  curated_root: ${storage.data_root}/curated
+  current_curated_root: ${storage.curated_root}/current
+  frozen_curated_root: ${storage.curated_root}/frozen
+  reports_root: ${storage.data_root}/reports
+  backtests_root: ${storage.data_root}/backtests
+  metadata_sqlite_path: ${storage.data_root}/metadata.sqlite
+  schema_root: ./schemas

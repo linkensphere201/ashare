@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-picker"
+version = "0.1.0"
+description = "Stock-first A-share daily quantitative research and report system"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "duckdb>=1.0",
+  "polars>=1.0",
+  "pyarrow>=16.0",
+  "pyyaml>=6.0",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+stock-picker = "stock_picker.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

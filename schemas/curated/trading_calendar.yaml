@@ -1,0 +1,63 @@
+dataset_id: trading_calendar
+dataset_name: Trading Calendar
+layer: curated
+version: v001
+description: Trading-date alignment for reports, lookback windows, and forward-return windows.
+primary_key:
+  - calendar_id
+  - trade_date
+fields:
+  - name: calendar_id
+    type: string
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Calendar name, such as cn_a_share.
+  - name: trade_date
+    type: date
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Calendar date.
+  - name: is_trading_day
+    type: bool
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Whether the date is a trading day.
+  - name: previous_trade_date
+    type: date
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Previous trading day.
+  - name: next_trade_date
+    type: date
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Next trading day.
+  - name: source
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Data source.
+  - name: source_batch_id
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Raw batch id.
+  - name: data_version
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Curated version.
+  - name: created_at
+    type: datetime
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Creation timestamp.

@@ -1,0 +1,96 @@
+dataset_id: capital_flow_or_chip
+dataset_name: Capital Flow Or Chip
+layer: curated
+version: v001
+description: Vendor-provided or derived capital-flow/chip-distribution fields for strategy research.
+primary_key:
+  - symbol
+  - trade_date
+partition:
+  - trade_year
+  - trade_month
+fields:
+  - name: symbol
+    type: string
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Canonical symbol.
+  - name: trade_date
+    type: date
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Trading date.
+  - name: main_force_holding_ratio
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Main-force holding or concentration ratio.
+  - name: close_profit_ratio
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Closing profit-chip ratio.
+  - name: main_net_inflow
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Main-force net inflow.
+  - name: retail_net_inflow
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Retail net inflow.
+  - name: chip_concentration
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Chip concentration metric.
+  - name: data_method
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Vendor method or calculation description.
+  - name: trade_year
+    type: integer
+    nullable: false
+    primary_key: false
+    partition_key: true
+    description: Physical partition year.
+  - name: trade_month
+    type: integer
+    nullable: false
+    primary_key: false
+    partition_key: true
+    description: Physical partition month.
+  - name: source
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Data source.
+  - name: source_batch_id
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Raw batch id.
+  - name: data_version
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Curated version.
+  - name: created_at
+    type: datetime
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Creation timestamp.

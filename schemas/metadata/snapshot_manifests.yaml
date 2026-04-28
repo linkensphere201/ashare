@@ -1,0 +1,43 @@
+table_id: snapshot_manifests
+table_name: Snapshot Manifests
+layer: metadata
+version: v001
+description: Logical data snapshot manifest for one report or backtest run.
+primary_key:
+  - snapshot_id
+fields:
+  - name: snapshot_id
+    type: text
+    nullable: false
+    primary_key: true
+    description: Snapshot manifest id.
+  - name: as_of_date
+    type: text
+    nullable: false
+    primary_key: false
+    description: Data perspective date.
+  - name: created_at
+    type: text
+    nullable: false
+    primary_key: false
+    description: Creation timestamp.
+  - name: data_frequency
+    type: text
+    nullable: false
+    primary_key: false
+    description: daily in MVP.
+  - name: config_version
+    type: text
+    nullable: true
+    primary_key: false
+    description: Rule or config version.
+  - name: manifest_json
+    type: text
+    nullable: false
+    primary_key: false
+    description: JSON references to versions, coverage, and notes.
+  - name: notes
+    type: text
+    nullable: true
+    primary_key: false
+    description: Optional notes.

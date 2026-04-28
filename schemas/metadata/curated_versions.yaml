@@ -1,0 +1,68 @@
+table_id: curated_versions
+table_name: Curated Versions
+layer: metadata
+version: v001
+description: Current and frozen curated data version metadata.
+primary_key:
+  - curated_version_id
+fields:
+  - name: curated_version_id
+    type: text
+    nullable: false
+    primary_key: true
+    description: Curated version id.
+  - name: dataset_id
+    type: text
+    nullable: false
+    primary_key: false
+    description: Referenced dataset id.
+  - name: schema_version_id
+    type: text
+    nullable: false
+    primary_key: false
+    description: Referenced schema version id.
+  - name: version_type
+    type: text
+    nullable: false
+    primary_key: false
+    description: current or frozen.
+  - name: snapshot_id
+    type: text
+    nullable: true
+    primary_key: false
+    description: Snapshot id for frozen slices.
+  - name: path
+    type: text
+    nullable: false
+    primary_key: false
+    description: Curated Parquet path.
+  - name: as_of_date
+    type: text
+    nullable: true
+    primary_key: false
+    description: Business as-of date.
+  - name: created_at
+    type: text
+    nullable: false
+    primary_key: false
+    description: Creation timestamp.
+  - name: source_batch_ids
+    type: text
+    nullable: true
+    primary_key: false
+    description: JSON list of raw batch ids.
+  - name: row_count
+    type: integer
+    nullable: true
+    primary_key: false
+    description: Row count.
+  - name: checksum
+    type: text
+    nullable: true
+    primary_key: false
+    description: Content checksum.
+  - name: status
+    type: text
+    nullable: false
+    primary_key: false
+    description: active, deprecated, or failed.

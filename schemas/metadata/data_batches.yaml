@@ -1,0 +1,68 @@
+table_id: data_batches
+table_name: Data Batches
+layer: metadata
+version: v001
+description: Raw fetch batch metadata for the lightweight Raw Zone.
+primary_key:
+  - batch_id
+fields:
+  - name: batch_id
+    type: text
+    nullable: false
+    primary_key: true
+    description: Raw batch id.
+  - name: source
+    type: text
+    nullable: false
+    primary_key: false
+    description: Data source name.
+  - name: dataset_name
+    type: text
+    nullable: false
+    primary_key: false
+    description: Source dataset name.
+  - name: retrieved_at
+    type: text
+    nullable: false
+    primary_key: false
+    description: Fetch timestamp.
+  - name: business_date
+    type: text
+    nullable: true
+    primary_key: false
+    description: Business or trading date.
+  - name: raw_path
+    type: text
+    nullable: false
+    primary_key: false
+    description: Raw file path.
+  - name: format
+    type: text
+    nullable: false
+    primary_key: false
+    description: Stored format.
+  - name: row_count
+    type: integer
+    nullable: true
+    primary_key: false
+    description: Row count.
+  - name: schema_hash
+    type: text
+    nullable: true
+    primary_key: false
+    description: Source schema hash.
+  - name: content_checksum
+    type: text
+    nullable: true
+    primary_key: false
+    description: Content checksum.
+  - name: status
+    type: text
+    nullable: false
+    primary_key: false
+    description: success, partial, or failed.
+  - name: notes
+    type: text
+    nullable: true
+    primary_key: false
+    description: Notes or error summary.

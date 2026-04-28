@@ -1,0 +1,48 @@
+table_id: datasets
+table_name: Datasets
+layer: metadata
+version: v001
+description: Logical dataset catalog.
+primary_key:
+  - dataset_id
+fields:
+  - name: dataset_id
+    type: text
+    nullable: false
+    primary_key: true
+    description: Dataset id.
+  - name: dataset_name
+    type: text
+    nullable: false
+    primary_key: false
+    description: Display name.
+  - name: layer
+    type: text
+    nullable: false
+    primary_key: false
+    description: curated, feature, signal, report, or backtest.
+  - name: description
+    type: text
+    nullable: true
+    primary_key: false
+    description: Dataset description.
+  - name: primary_symbol_field
+    type: text
+    nullable: true
+    primary_key: false
+    description: Primary symbol field.
+  - name: primary_time_field
+    type: text
+    nullable: true
+    primary_key: false
+    description: Primary time field.
+  - name: status
+    type: text
+    nullable: false
+    primary_key: false
+    description: active or deprecated.
+  - name: created_at
+    type: text
+    nullable: false
+    primary_key: false
+    description: Creation timestamp.

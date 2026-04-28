@@ -1,0 +1,85 @@
+dataset_id: risk_events
+dataset_name: Risk Events
+layer: curated
+version: v001
+description: Daily risk and trading-state events that can block, warn, or annotate candidates.
+primary_key:
+  - symbol
+  - event_date
+  - event_type
+partition:
+  - event_year
+  - event_month
+fields:
+  - name: symbol
+    type: string
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Canonical symbol.
+  - name: event_date
+    type: date
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Event or effective date.
+  - name: event_type
+    type: string
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: st_status, suspension, limit_up, limit_down, abnormal_move, or risk_warning.
+  - name: severity
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: info, warning, or blocker.
+  - name: is_active
+    type: bool
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Whether the event is active on event_date.
+  - name: description
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Human-readable explanation.
+  - name: event_year
+    type: integer
+    nullable: false
+    primary_key: false
+    partition_key: true
+    description: Physical partition year.
+  - name: event_month
+    type: integer
+    nullable: false
+    primary_key: false
+    partition_key: true
+    description: Physical partition month.
+  - name: source
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Data source.
+  - name: source_batch_id
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Raw batch id.
+  - name: data_version
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Curated version.
+  - name: created_at
+    type: datetime
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Creation timestamp.

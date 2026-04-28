@@ -1,0 +1,44 @@
+table_id: schema_fields
+table_name: Schema Fields
+layer: metadata
+version: v001
+description: Field-level schema definitions.
+primary_key:
+  - schema_version_id
+  - field_name
+fields:
+  - name: schema_version_id
+    type: text
+    nullable: false
+    primary_key: true
+    description: Referenced schema version id.
+  - name: field_name
+    type: text
+    nullable: false
+    primary_key: true
+    description: Field name.
+  - name: field_type
+    type: text
+    nullable: false
+    primary_key: false
+    description: string, date, datetime, double, bool, integer, or json.
+  - name: nullable
+    type: integer
+    nullable: false
+    primary_key: false
+    description: 0 or 1.
+  - name: is_primary_key
+    type: integer
+    nullable: false
+    primary_key: false
+    description: 0 or 1.
+  - name: is_partition_key
+    type: integer
+    nullable: false
+    primary_key: false
+    description: 0 or 1.
+  - name: description
+    type: text
+    nullable: true
+    primary_key: false
+    description: Field description.

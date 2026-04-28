@@ -1,0 +1,144 @@
+dataset_id: daily_prices
+dataset_name: Daily Prices
+layer: curated
+version: v001
+description: Daily OHLCV and trading data for stocks, ETFs, and indices.
+primary_key:
+  - symbol
+  - trade_date
+partition:
+  - trade_year
+  - trade_month
+fields:
+  - name: symbol
+    type: string
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Canonical symbol.
+  - name: trade_date
+    type: date
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Trading date.
+  - name: asset_type
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: stock, etf, or index.
+  - name: open
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Open price.
+  - name: high
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: High price.
+  - name: low
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Low price.
+  - name: close
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Close price.
+  - name: pre_close
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Previous close.
+  - name: volume
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Trading volume.
+  - name: amount
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Trading amount.
+  - name: pct_change
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Percentage change.
+  - name: turnover_rate
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Turnover rate.
+  - name: adj_factor
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Adjustment factor.
+  - name: is_suspended
+    type: bool
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Suspension flag.
+  - name: limit_up
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Limit-up price.
+  - name: limit_down
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Limit-down price.
+  - name: trade_year
+    type: integer
+    nullable: false
+    primary_key: false
+    partition_key: true
+    description: Physical partition year.
+  - name: trade_month
+    type: integer
+    nullable: false
+    primary_key: false
+    partition_key: true
+    description: Physical partition month.
+  - name: source
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Data source.
+  - name: source_batch_id
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Raw batch id.
+  - name: data_version
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Curated version.
+  - name: created_at
+    type: datetime
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Creation timestamp.

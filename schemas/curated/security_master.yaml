@@ -1,0 +1,86 @@
+dataset_id: security_master
+dataset_name: Security Master
+layer: curated
+version: v001
+description: Canonical security identity table for stocks, ETFs, and indices.
+primary_key:
+  - symbol
+fields:
+  - name: symbol
+    type: string
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Canonical symbol, such as 600519.SH.
+  - name: raw_symbol
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Source-native symbol.
+  - name: exchange
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Exchange code, such as SH, SZ, or BJ.
+  - name: asset_type
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: stock, etf, or index.
+  - name: name
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Security name.
+  - name: market
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Board or market type.
+  - name: list_date
+    type: date
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Listing date.
+  - name: delist_date
+    type: date
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Delisting date.
+  - name: status
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: active, delisted, suspended, or unknown.
+  - name: source
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Data source.
+  - name: source_batch_id
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Raw batch id.
+  - name: data_version
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Curated version.
+  - name: created_at
+    type: datetime
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Creation timestamp.
