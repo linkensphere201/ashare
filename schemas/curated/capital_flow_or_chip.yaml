@@ -40,6 +40,12 @@ fields:
     primary_key: false
     partition_key: false
     description: Main-force net inflow.
+  - name: main_net_inflow_rate
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Main-force net inflow rate.
   - name: retail_net_inflow
     type: double
     nullable: true

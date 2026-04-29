@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from stock_picker.curated import import_curated_csv, inspect_curated
+from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
+from stock_picker.provider import fetch_provider_raw, probe_provider_api
 from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
+from stock_picker.strategy import backtest_candidate_001, rank_candidate_001
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,6 +19,49 @@ def build_parser() -> argparse.ArgumentParser:
 
     storage = subparsers.add_parser("storage", help="Manage local storage paths and metadata")
     storage_subparsers = storage.add_subparsers(dest="storage_command", required=True)
+
+    provider = subparsers.add_parser("provider", help="Fetch raw data from external providers")
+    provider_subparsers = provider.add_subparsers(dest="provider_command", required=True)
+
+    strategy = subparsers.add_parser("strategy", help="Run strategy ranking and diagnostics")
+    strategy_subparsers = strategy.add_subparsers(dest="strategy_command", required=True)
+
+    rank_candidate_cmd = strategy_subparsers.add_parser(
+        "rank-candidate-001",
+        help="Rank Strategy Candidate 001 v2 candidates from a snapshot",
+    )
+    rank_candidate_cmd.add_argument("--snapshot-id", required=True, help="Snapshot id")
+    rank_candidate_cmd.add_argument("--top", type=int, default=10, help="Candidate count")
+    rank_candidate_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    backtest_candidate_cmd = strategy_subparsers.add_parser(
+        "backtest-candidate-001",
+        help="Backtest Strategy Candidate 001 v2 forward returns from a snapshot",
+    )
+    backtest_candidate_cmd.add_argument("--snapshot-id", required=True, help="Snapshot id")
+    backtest_candidate_cmd.add_argument("--holding-days", type=int, default=20, help="Holding window in trading rows")
+    backtest_candidate_cmd.add_argument("--top", type=int, default=10, help="Candidate count per signal date")
+    backtest_candidate_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    fetch_cmd = provider_subparsers.add_parser("fetch", help="Fetch a raw provider dataset into the raw store")
+    fetch_cmd.add_argument("--source", required=True, help="Provider source, such as tushare")
+    fetch_cmd.add_argument("--dataset", required=True, help="Dataset id, such as daily_prices")
+    fetch_cmd.add_argument("--ts-code", help="Provider stock code, such as 600519.SH")
+    fetch_cmd.add_argument("--trade-date", help="Single trade date, such as 20260428 or 2026-04-28")
+    fetch_cmd.add_argument("--start-date", help="Start date, such as 2026-01-01")
+    fetch_cmd.add_argument("--end-date", help="End date, such as 2026-04-28")
+    fetch_cmd.add_argument("--as-of-date", help="Business as-of date for the raw batch")
+    fetch_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
+    fetch_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    probe_cmd = provider_subparsers.add_parser("probe", help="Probe provider API access and expected fields")
+    probe_cmd.add_argument("--source", required=True, help="Provider source, such as tushare")
+    probe_cmd.add_argument("--api", required=True, help="Provider API name, such as cyq_perf")
+    probe_cmd.add_argument("--ts-code", help="Provider stock code, such as 600519.SH")
+    probe_cmd.add_argument("--trade-date", help="Single trade date, such as 20260428 or 2026-04-28")
+    probe_cmd.add_argument("--start-date", help="Start date, such as 2026-01-01")
+    probe_cmd.add_argument("--end-date", help="End date, such as 2026-04-28")
+    probe_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
 
     init_cmd = storage_subparsers.add_parser("init", help="Create configured storage directories and metadata tables")
     init_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
@@ -39,6 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
     import_curated_cmd.add_argument("--source", default="manual_csv", help="Source name for lineage metadata")
     import_curated_cmd.add_argument("--as-of-date", help="Business as-of date, such as 2026-04-28")
     import_curated_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    promote_raw_cmd = storage_subparsers.add_parser(
+        "promote-raw",
+        help="Promote a raw provider batch into the curated current Parquet store",
+    )
+    promote_raw_cmd.add_argument("--source", required=True, help="Raw source, such as tushare")
+    promote_raw_cmd.add_argument("--dataset", required=True, help="Raw dataset id, such as daily_prices")
+    promote_raw_cmd.add_argument("--as-of-date", help="Business as-of date for selecting the raw batch")
+    promote_raw_cmd.add_argument("--batch-id", help="Exact raw batch id to promote")
+    promote_raw_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     inspect_curated_cmd = storage_subparsers.add_parser(
         "inspect-curated",
@@ -115,6 +170,20 @@ def main(argv: list[str] | None = None) -> int:
         print(result.message)
         return 1
 
+    if args.command == "storage" and args.storage_command == "promote-raw":
+        result = promote_raw_batch(
+            config_path=Path(args.config),
+            source=args.source,
+            dataset=args.dataset,
+            as_of_date=args.as_of_date,
+            batch_id=args.batch_id,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
     if args.command == "storage" and args.storage_command == "inspect-curated":
         result = inspect_curated(Path(args.config), args.dataset)
         if result.ok:
@@ -145,6 +214,56 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "storage" and args.storage_command == "inspect-snapshot":
         result = inspect_snapshot(Path(args.config), args.snapshot_id)
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "provider" and args.provider_command == "fetch":
+        result = fetch_provider_raw(
+            config_path=Path(args.config),
+            source=args.source,
+            dataset=args.dataset,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            as_of_date=args.as_of_date,
+            ts_code=args.ts_code,
+            trade_date=args.trade_date,
+            token_env=args.token_env,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "provider" and args.provider_command == "probe":
+        result = probe_provider_api(
+            source=args.source,
+            api=args.api,
+            ts_code=args.ts_code,
+            trade_date=args.trade_date,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            token_env=args.token_env,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "strategy" and args.strategy_command == "rank-candidate-001":
+        result = rank_candidate_001(Path(args.config), args.snapshot_id, args.top)
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "strategy" and args.strategy_command == "backtest-candidate-001":
+        result = backtest_candidate_001(Path(args.config), args.snapshot_id, args.holding_days, args.top)
         if result.ok:
             print(result.message)
             return 0

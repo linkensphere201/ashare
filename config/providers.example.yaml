@@ -1,13 +1,15 @@
 providers:
-  default: manual_csv
+  default: tushare
 
+  # Kept for development and tests only. The normal workflow should fetch raw data
+  # from a provider instead of requiring manual user CSV files.
   manual_csv:
     enabled: true
     input_root: ./data/manual_input
 
+  tushare:
+    enabled: true
+    token_env: TUSHARE_TOKEN
+
   akshare:
     enabled: false
-
-  tushare:
-    enabled: false
-    token_env: TUSHARE_TOKEN

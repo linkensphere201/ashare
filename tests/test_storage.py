@@ -1,12 +1,16 @@
 from pathlib import Path
+from datetime import date, timedelta
+import json
 import sqlite3
 
 import polars as pl
 
-from stock_picker.curated import import_curated_csv, inspect_curated
+from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
+from stock_picker.provider import fetch_provider_raw, probe_provider_api, write_raw_batch
 from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
+from stock_picker.strategy import backtest_candidate_001, rank_candidate_001
 
 
 def test_storage_init_and_validate(tmp_path: Path) -> None:
@@ -183,6 +187,324 @@ def test_check_quality_fails_on_duplicate_primary_key(tmp_path: Path) -> None:
     assert "primary key duplicates found" in quality.message
 
 
+def test_write_raw_batch_records_metadata(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    frame = pl.DataFrame(
+        {
+            "ts_code": ["600519.SH", "000001.SZ"],
+            "trade_date": ["20260428", "20260428"],
+            "close": [1690.0, 10.3],
+        }
+    )
+
+    result = write_raw_batch(
+        config_path=config_path,
+        source="tushare",
+        dataset="daily_prices",
+        frame=frame,
+        as_of_date="2026-04-28",
+    )
+
+    assert result.ok
+    assert result.batch_id == "tushare_daily_prices_20260428_001"
+    assert result.raw_path is not None
+    assert result.raw_path.exists()
+
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        row = connection.execute(
+            """
+            SELECT source, dataset_name, business_date, raw_path, format, row_count, status
+            FROM data_batches
+            """
+        ).fetchone()
+
+    assert row[0:3] == ("tushare", "daily_prices", "2026-04-28")
+    assert row[4:] == ("csv", 2, "success")
+    assert str(result.raw_path) == row[3]
+
+
+def test_fetch_provider_requires_tushare_token(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+
+    result = fetch_provider_raw(
+        config_path=config_path,
+        source="tushare",
+        dataset="daily_prices",
+        start_date="2026-04-28",
+        end_date="2026-04-28",
+    )
+
+    assert not result.ok
+    assert result.message == "missing required environment variable: TUSHARE_TOKEN"
+
+
+def test_promote_tushare_daily_prices_raw(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    _write_daily_prices_schema(
+        tmp_path,
+        extra_fields=[
+            ("asset_type", "string", False),
+            ("open", "double", True),
+            ("high", "double", True),
+            ("low", "double", True),
+            ("close", "double", True),
+            ("pre_close", "double", True),
+            ("volume", "double", True),
+            ("amount", "double", True),
+            ("pct_change", "double", True),
+            ("source", "string", False),
+            ("source_batch_id", "string", False),
+            ("data_version", "string", False),
+            ("created_at", "datetime", False),
+            ("trade_year", "integer", False),
+            ("trade_month", "integer", False),
+        ],
+    )
+    assert init_storage(config_path).ok
+    assert register_schemas(config_path).ok
+    raw = pl.DataFrame(
+        {
+            "ts_code": ["600519.SH"],
+            "trade_date": ["20260428"],
+            "open": [1680.0],
+            "high": [1698.0],
+            "low": [1672.0],
+            "close": [1690.0],
+            "pre_close": [1678.0],
+            "vol": [2100000.0],
+            "amount": [3549000.0],
+            "pct_chg": [0.72],
+        }
+    )
+    write_raw_batch(config_path, "tushare", "daily_prices", raw, "2026-04-28")
+
+    result = promote_raw_batch(config_path, "tushare", "daily_prices", "2026-04-28")
+
+    assert result.ok
+    assert result.output_path is not None
+    frame = pl.read_parquet(result.output_path)
+    assert frame.select("symbol").to_series().to_list() == ["600519.SH"]
+    assert frame.select("volume").to_series().to_list() == [2100000.0]
+    assert frame.select("trade_year").to_series().to_list() == [2026]
+
+
+def test_promote_tushare_moneyflow_and_cyq_merge(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    _write_capital_flow_schema(tmp_path)
+    assert init_storage(config_path).ok
+    assert register_schemas(config_path).ok
+    moneyflow = pl.DataFrame(
+        {
+            "ts_code": ["600519.SH"],
+            "trade_date": ["20260428"],
+            "net_amount": [1200.5],
+            "net_amount_rate": [3.2],
+        }
+    )
+    cyq = pl.DataFrame(
+        {
+            "ts_code": ["600519.SH"],
+            "trade_date": ["20260428"],
+            "winner_rate": [85.0],
+        }
+    )
+    write_raw_batch(config_path, "tushare", "moneyflow_dc", moneyflow, "2026-04-28")
+    write_raw_batch(config_path, "tushare", "cyq_perf", cyq, "2026-04-28")
+
+    moneyflow_result = promote_raw_batch(config_path, "tushare", "moneyflow_dc", "2026-04-28")
+    cyq_result = promote_raw_batch(config_path, "tushare", "cyq_perf", "2026-04-28")
+
+    assert moneyflow_result.ok
+    assert cyq_result.ok
+    assert cyq_result.output_path is not None
+    frame = pl.read_parquet(cyq_result.output_path)
+    row = frame.row(0, named=True)
+    assert row["symbol"] == "600519.SH"
+    assert row["main_net_inflow"] == 1200.5
+    assert row["main_net_inflow_rate"] == 3.2
+    assert row["close_profit_ratio"] == 85.0
+
+
+def test_rank_candidate_001_outputs_matching_candidate(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    data_root = tmp_path / "data" / "curated" / "current"
+    security_path = data_root / "security_master" / "part-000.parquet"
+    daily_path = data_root / "daily_prices" / "part-000.parquet"
+    capital_path = data_root / "capital_flow_or_chip" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    daily_path.parent.mkdir(parents=True)
+    capital_path.parent.mkdir(parents=True)
+
+    latest = date(2026, 4, 28)
+    dates = [latest - timedelta(days=39 - index) for index in range(40)]
+    closes = [10.0] * 39 + [20.0]
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "name": ["Kweichow Moutai"],
+            "status": ["active"],
+        }
+    ).write_parquet(security_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"] * 40,
+            "trade_date": dates,
+            "close": closes,
+            "amount": [1000.0] * 40,
+        }
+    ).write_parquet(daily_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "trade_date": [latest],
+            "main_net_inflow_rate": [3.2],
+            "close_profit_ratio": [85.0],
+        }
+    ).write_parquet(capital_path)
+    manifest = {
+        "curated_versions": {
+            "security_master": {"path": str(security_path)},
+            "daily_prices": {"path": str(daily_path)},
+            "capital_flow_or_chip": {"path": str(capital_path)},
+        }
+    }
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO snapshot_manifests (
+              snapshot_id,
+              as_of_date,
+              created_at,
+              data_frequency,
+              config_version,
+              manifest_json,
+              notes
+            )
+            VALUES ('snapshot_test', '2026-04-28', '2026-04-28T16:00:00+00:00', 'daily', 'test', ?, NULL)
+            """,
+            (json.dumps(manifest),),
+        )
+
+    result = rank_candidate_001(config_path, "snapshot_test", top=10)
+
+    assert result.ok
+    assert "600519.SH" in result.message
+    assert "net_amount_rate>0" in result.message
+
+
+def test_backtest_candidate_001_outputs_forward_return(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    data_root = tmp_path / "data" / "curated" / "current"
+    security_path = data_root / "security_master" / "part-000.parquet"
+    daily_path = data_root / "daily_prices" / "part-000.parquet"
+    capital_path = data_root / "capital_flow_or_chip" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    daily_path.parent.mkdir(parents=True)
+    capital_path.parent.mkdir(parents=True)
+
+    latest = date(2026, 4, 28)
+    dates = [latest - timedelta(days=44 - index) for index in range(45)]
+    signal_date = dates[39]
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "name": ["Kweichow Moutai"],
+            "status": ["active"],
+        }
+    ).write_parquet(security_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"] * 45,
+            "trade_date": dates,
+            "close": [10.0] * 39 + [20.0] + [22.0] * 5,
+            "amount": [1000.0] * 45,
+        }
+    ).write_parquet(daily_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "trade_date": [signal_date],
+            "main_net_inflow_rate": [3.2],
+            "close_profit_ratio": [85.0],
+        }
+    ).write_parquet(capital_path)
+    manifest = {
+        "curated_versions": {
+            "security_master": {"path": str(security_path)},
+            "daily_prices": {"path": str(daily_path)},
+            "capital_flow_or_chip": {"path": str(capital_path)},
+        }
+    }
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO snapshot_manifests (
+              snapshot_id,
+              as_of_date,
+              created_at,
+              data_frequency,
+              config_version,
+              manifest_json,
+              notes
+            )
+            VALUES ('snapshot_backtest', '2026-04-28', '2026-04-28T16:00:00+00:00', 'daily', 'test', ?, NULL)
+            """,
+            (json.dumps(manifest),),
+        )
+
+    result = backtest_candidate_001(config_path, "snapshot_backtest", holding_days=5, top=10)
+
+    assert result.ok
+    assert "Strategy Candidate 001 v2 backtest" in result.message
+    assert "trade_count: 1" in result.message
+    assert "avg_forward_return: 0.100000" in result.message
+
+
+def test_fetch_cyq_perf_requires_ts_code(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+
+    result = fetch_provider_raw(
+        config_path=config_path,
+        source="tushare",
+        dataset="cyq_perf",
+        start_date="2026-04-28",
+        end_date="2026-04-28",
+    )
+
+    assert not result.ok
+    assert result.message == "cyq_perf fetch requires --ts-code"
+
+
+def test_probe_provider_requires_tushare_token(monkeypatch) -> None:
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+
+    result = probe_provider_api(
+        source="tushare",
+        api="cyq_perf",
+        ts_code="600519.SH",
+        trade_date="20260428",
+    )
+
+    assert not result.ok
+    assert result.message == "missing required environment variable: TUSHARE_TOKEN"
+
+
+def test_probe_provider_rejects_unsupported_api() -> None:
+    result = probe_provider_api(source="tushare", api="unknown_api")
+
+    assert not result.ok
+    assert result.message == "unsupported tushare api: unknown_api"
+
+
 def _write_daily_prices_schema(
     tmp_path: Path,
     extra_fields: list[tuple[str, str, bool]] | None = None,
@@ -226,6 +548,48 @@ def _write_daily_prices_schema(
         ),
         encoding="utf-8",
     )
+
+
+def _write_capital_flow_schema(tmp_path: Path) -> None:
+    schema_dir = tmp_path / "schemas" / "curated"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    fields = [
+        ("symbol", "string", False, True, False),
+        ("trade_date", "date", False, True, False),
+        ("main_force_holding_ratio", "double", True, False, False),
+        ("close_profit_ratio", "double", True, False, False),
+        ("main_net_inflow", "double", True, False, False),
+        ("main_net_inflow_rate", "double", True, False, False),
+        ("retail_net_inflow", "double", True, False, False),
+        ("chip_concentration", "double", True, False, False),
+        ("data_method", "string", True, False, False),
+        ("trade_year", "integer", False, False, True),
+        ("trade_month", "integer", False, False, True),
+        ("source", "string", False, False, False),
+        ("source_batch_id", "string", False, False, False),
+        ("data_version", "string", False, False, False),
+        ("created_at", "datetime", False, False, False),
+    ]
+    lines = [
+        "dataset_id: capital_flow_or_chip",
+        "dataset_name: Capital Flow Or Chip",
+        "layer: curated",
+        "version: v001",
+        "description: Capital flow schema.",
+        "fields:",
+    ]
+    for name, field_type, nullable, primary_key, partition_key in fields:
+        lines.extend(
+            [
+                f"  - name: {name}",
+                f"    type: {field_type}",
+                f"    nullable: {str(nullable).lower()}",
+                f"    primary_key: {str(primary_key).lower()}",
+                f"    partition_key: {str(partition_key).lower()}",
+                f"    description: {name}.",
+            ]
+        )
+    (schema_dir / "capital_flow_or_chip.yaml").write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_storage_config(tmp_path: Path) -> Path:

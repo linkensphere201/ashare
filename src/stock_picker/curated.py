@@ -29,6 +29,15 @@ class CuratedInspectionResult:
     message: str
 
 
+RAW_TO_CURATED_DATASET = {
+    "security_master": "security_master",
+    "trading_calendar": "trading_calendar",
+    "daily_prices": "daily_prices",
+    "moneyflow_dc": "capital_flow_or_chip",
+    "cyq_perf": "capital_flow_or_chip",
+}
+
+
 def import_curated_csv(
     config_path: Path,
     dataset_id: str,
@@ -149,6 +158,50 @@ def import_curated_csv(
     )
 
 
+def promote_raw_batch(
+    config_path: Path,
+    source: str,
+    dataset: str,
+    as_of_date: str | None = None,
+    batch_id: str | None = None,
+) -> CuratedImportResult:
+    config = load_storage_config(config_path)
+    initialize_metadata_catalog(config.metadata_sqlite_path)
+    batch = _load_raw_batch(config.metadata_sqlite_path, source, dataset, as_of_date, batch_id)
+    if batch is None:
+        selector = batch_id or f"{source}/{dataset}/{as_of_date or 'latest'}"
+        return CuratedImportResult(False, f"raw batch not found: {selector}")
+
+    curated_dataset = RAW_TO_CURATED_DATASET.get(batch["dataset_name"])
+    if curated_dataset is None:
+        return CuratedImportResult(False, f"no curated mapping for raw dataset: {batch['dataset_name']}")
+
+    raw_path = Path(str(batch["raw_path"]))
+    if not raw_path.exists():
+        return CuratedImportResult(False, f"raw batch file not found: {raw_path}")
+
+    schema = _load_registered_schema(config, curated_dataset)
+    raw_frame = pl.read_csv(raw_path)
+    mapped = _map_tushare_raw_to_curated(raw_frame, str(batch["dataset_name"]))
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    data_version = str(batch["business_date"] or now[:10])
+    mapped = _enrich_frame(mapped, schema, source, str(batch["batch_id"]), data_version, now)
+    mapped = _fill_missing_nullable_columns(mapped, schema)
+    mapped = _merge_with_existing_current(config, curated_dataset, mapped, schema)
+    validation_error = _validate_required_columns(mapped, schema)
+    if validation_error:
+        return CuratedImportResult(False, validation_error)
+    return _write_curated_current(
+        config=config,
+        dataset_id=curated_dataset,
+        frame=mapped,
+        schema=schema,
+        as_of_date=data_version,
+        source_batch_ids=[str(batch["batch_id"])],
+        created_at=now,
+    )
+
+
 def inspect_curated(config_path: Path, dataset_id: str) -> CuratedInspectionResult:
     config = load_storage_config(config_path)
     initialize_metadata_catalog(config.metadata_sqlite_path)
@@ -234,6 +287,72 @@ def inspect_curated(config_path: Path, dataset_id: str) -> CuratedInspectionResu
     return CuratedInspectionResult(True, message)
 
 
+def _write_curated_current(
+    config: StorageConfig,
+    dataset_id: str,
+    frame: pl.DataFrame,
+    schema: list[dict[str, object]],
+    as_of_date: str | None,
+    source_batch_ids: list[str],
+    created_at: str,
+) -> CuratedImportResult:
+    output_dir = config.current_curated_root / dataset_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "part-000.parquet"
+    frame.select([field["name"] for field in schema]).write_parquet(output_path)
+    row_count = frame.height
+    checksum = _sha256_file(output_path)
+    data_version = as_of_date or created_at[:10]
+    curated_version_id = f"{dataset_id}_current_{data_version.replace('-', '')}"
+    with sqlite3.connect(config.metadata_sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO curated_versions (
+              curated_version_id,
+              dataset_id,
+              schema_version_id,
+              version_type,
+              snapshot_id,
+              path,
+              as_of_date,
+              created_at,
+              source_batch_ids,
+              row_count,
+              checksum,
+              status
+            )
+            VALUES (?, ?, ?, 'current', NULL, ?, ?, ?, ?, ?, ?, 'active')
+            ON CONFLICT(curated_version_id) DO UPDATE SET
+              schema_version_id = excluded.schema_version_id,
+              path = excluded.path,
+              as_of_date = excluded.as_of_date,
+              created_at = excluded.created_at,
+              source_batch_ids = excluded.source_batch_ids,
+              row_count = excluded.row_count,
+              checksum = excluded.checksum,
+              status = excluded.status
+            """,
+            (
+                curated_version_id,
+                dataset_id,
+                f"{dataset_id}_schema_v001",
+                str(output_path),
+                as_of_date,
+                created_at,
+                json.dumps(source_batch_ids),
+                row_count,
+                checksum,
+            ),
+        )
+
+    return CuratedImportResult(
+        True,
+        f"promoted {row_count} rows into curated current: {dataset_id}",
+        output_path,
+        row_count,
+    )
+
+
 def _load_registered_schema(config: StorageConfig, dataset_id: str) -> list[dict[str, object]]:
     with sqlite3.connect(config.metadata_sqlite_path) as connection:
         row = connection.execute(
@@ -268,6 +387,136 @@ def _load_registered_schema(config: StorageConfig, dataset_id: str) -> list[dict
         }
         for field_name, field_type, nullable, is_primary_key, is_partition_key in fields
     ]
+
+
+def _load_raw_batch(
+    sqlite_path: Path,
+    source: str,
+    dataset: str,
+    as_of_date: str | None,
+    batch_id: str | None,
+) -> dict[str, object] | None:
+    with sqlite3.connect(sqlite_path) as connection:
+        if batch_id:
+            row = connection.execute(
+                """
+                SELECT batch_id, source, dataset_name, business_date, raw_path
+                FROM data_batches
+                WHERE batch_id = ? AND status = 'success'
+                """,
+                (batch_id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT batch_id, source, dataset_name, business_date, raw_path
+                FROM data_batches
+                WHERE source = ?
+                  AND dataset_name = ?
+                  AND (? IS NULL OR business_date = ?)
+                  AND status = 'success'
+                ORDER BY retrieved_at DESC
+                LIMIT 1
+                """,
+                (source, dataset, as_of_date, as_of_date),
+            ).fetchone()
+    if row is None:
+        return None
+    batch_id_value, source_value, dataset_name, business_date, raw_path = row
+    return {
+        "batch_id": batch_id_value,
+        "source": source_value,
+        "dataset_name": dataset_name,
+        "business_date": business_date,
+        "raw_path": raw_path,
+    }
+
+
+def _map_tushare_raw_to_curated(frame: pl.DataFrame, dataset: str) -> pl.DataFrame:
+    if dataset == "security_master":
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("symbol"),
+                pl.col("symbol").alias("raw_symbol"),
+                pl.col("ts_code").str.split(".").list.get(1).alias("exchange"),
+                pl.lit("stock").alias("asset_type"),
+                _parse_yyyymmdd("list_date").alias("list_date"),
+                _parse_yyyymmdd("delist_date").alias("delist_date"),
+                pl.lit("active").alias("status"),
+            ]
+        ).select(["symbol", "raw_symbol", "exchange", "asset_type", "name", "market", "list_date", "delist_date", "status"])
+    if dataset == "trading_calendar":
+        return frame.with_columns(
+            [
+                pl.lit("cn_a_share").alias("calendar_id"),
+                _parse_yyyymmdd("cal_date").alias("trade_date"),
+                (pl.col("is_open").cast(pl.Int64, strict=False) == 1).alias("is_trading_day"),
+                _parse_yyyymmdd("pretrade_date").alias("previous_trade_date"),
+                pl.lit(None).alias("next_trade_date"),
+            ]
+        ).select(["calendar_id", "trade_date", "is_trading_day", "previous_trade_date", "next_trade_date"])
+    if dataset == "daily_prices":
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("symbol"),
+                _parse_yyyymmdd("trade_date").alias("trade_date"),
+                pl.lit("stock").alias("asset_type"),
+                pl.col("vol").alias("volume"),
+                pl.col("pct_chg").alias("pct_change"),
+            ]
+        ).select(["symbol", "trade_date", "asset_type", "open", "high", "low", "close", "pre_close", "volume", "amount", "pct_change"])
+    if dataset == "moneyflow_dc":
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("symbol"),
+                _parse_yyyymmdd("trade_date").alias("trade_date"),
+                pl.col("net_amount").alias("main_net_inflow"),
+                pl.col("net_amount_rate").alias("main_net_inflow_rate"),
+                pl.lit("tushare_moneyflow_dc").alias("data_method"),
+            ]
+        ).select(["symbol", "trade_date", "main_net_inflow", "main_net_inflow_rate", "data_method"])
+    if dataset == "cyq_perf":
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("symbol"),
+                _parse_yyyymmdd("trade_date").alias("trade_date"),
+                pl.col("winner_rate").alias("close_profit_ratio"),
+                pl.lit("tushare_cyq_perf").alias("data_method"),
+            ]
+        ).select(["symbol", "trade_date", "close_profit_ratio", "data_method"])
+    raise ValueError(f"unsupported raw dataset mapping: {dataset}")
+
+
+def _parse_yyyymmdd(column: str) -> pl.Expr:
+    if column in ("delist_date", "pretrade_date"):
+        return (
+            pl.when(pl.col(column).is_null() | (pl.col(column).cast(pl.Utf8) == ""))
+            .then(None)
+            .otherwise(pl.col(column).cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d", strict=False))
+        )
+    return pl.col(column).cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d", strict=False)
+
+
+def _merge_with_existing_current(
+    config: StorageConfig,
+    dataset_id: str,
+    frame: pl.DataFrame,
+    schema: list[dict[str, object]],
+) -> pl.DataFrame:
+    output_path = config.current_curated_root / dataset_id / "part-000.parquet"
+    if not output_path.exists():
+        return frame
+    existing = pl.read_parquet(output_path)
+    combined = pl.concat([existing, frame], how="diagonal_relaxed")
+    primary_keys = [str(field["name"]) for field in schema if bool(field["primary_key"])]
+    if not primary_keys:
+        return combined
+    aggregations = [
+        pl.col(column).drop_nulls().last().alias(column)
+        for column in combined.columns
+        if column not in primary_keys
+    ]
+    return combined.group_by(primary_keys, maintain_order=True).agg(aggregations)
 
 
 def _enrich_frame(
