@@ -9,7 +9,6 @@ pytest-cache-files-*/
 
 .env
 .env.*
-!.env.example
 
 config/*.yaml
 !config/*.example.yaml
