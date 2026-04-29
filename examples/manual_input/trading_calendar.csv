@@ -1,0 +1,3 @@
+calendar_id,trade_date,is_trading_day,previous_trade_date,next_trade_date
+cn_a_share,2026-04-27,true,2026-04-24,2026-04-28
+cn_a_share,2026-04-28,true,2026-04-27,2026-04-29

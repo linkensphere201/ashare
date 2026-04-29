@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+pytest-cache-files-*/
 .ruff_cache/
 .mypy_cache/
 .tmp/
@@ -9,6 +10,9 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+config/*.yaml
+!config/*.example.yaml
 
 data/
 *.sqlite

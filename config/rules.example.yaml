@@ -1,0 +1,25 @@
+rules:
+  profile: mvp
+
+  universe:
+    include_asset_types:
+      - stock
+    exclude_st: true
+    exclude_suspended: true
+    listing_age_days_min: null
+    daily_amount_min: null
+    market_cap_min: null
+
+  factors:
+    enabled_groups:
+      - momentum
+      - liquidity
+      - risk
+    weights:
+      momentum: 0.5
+      liquidity: 0.3
+      risk: 0.2
+
+  report:
+    candidate_limit: 30
+    focus_card_limit: 10

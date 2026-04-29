@@ -1,0 +1,13 @@
+providers:
+  default: manual_csv
+
+  manual_csv:
+    enabled: true
+    input_root: ./data/manual_input
+
+  akshare:
+    enabled: false
+
+  tushare:
+    enabled: false
+    token_env: TUSHARE_TOKEN

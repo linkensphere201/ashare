@@ -1,0 +1,3 @@
+symbol,event_date,event_type,severity,is_active,description
+600519.SH,2026-04-28,risk_warning,info,false,No active blocker in sample data.
+000001.SZ,2026-04-28,risk_warning,info,false,No active blocker in sample data.
