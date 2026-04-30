@@ -76,6 +76,20 @@ def _ensure_metadata_migrations(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN symbol_start_offset INTEGER")
     if "symbol_end_offset" not in task_columns:
         connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN symbol_end_offset INTEGER")
+    if "task_type" not in task_columns:
+        connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN task_type TEXT")
+    if "start_date" not in task_columns:
+        connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN start_date TEXT")
+    if "end_date" not in task_columns:
+        connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN end_date TEXT")
+    if "payload_json" not in task_columns:
+        connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN payload_json TEXT")
+    if "error_reason" not in task_columns:
+        connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN error_reason TEXT")
+    if "provider_message" not in task_columns:
+        connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN provider_message TEXT")
+    if "retryable" not in task_columns:
+        connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN retryable INTEGER")
 
 
 def _load_schema_file(schema_path: Path) -> dict[str, object]:
@@ -287,14 +301,21 @@ CREATE TABLE IF NOT EXISTS provider_run_tasks (
   run_id TEXT NOT NULL,
   source TEXT NOT NULL,
   dataset_name TEXT NOT NULL,
+  task_type TEXT,
   trade_date TEXT,
   symbol_start_offset INTEGER,
   symbol_end_offset INTEGER,
+  start_date TEXT,
+  end_date TEXT,
+  payload_json TEXT,
   status TEXT NOT NULL,
   attempts INTEGER NOT NULL,
   raw_batch_id TEXT,
   row_count INTEGER NOT NULL,
+  error_reason TEXT,
   error_message TEXT,
+  provider_message TEXT,
+  retryable INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   started_at TEXT,

@@ -894,10 +894,10 @@ def test_run_cyq_perf_batches_resumes_from_saved_offset(tmp_path: Path, monkeypa
     )
 
     assert first.ok
-    assert "next_offset=2/4" in first.message
+    assert "tasks_success=1/2" in first.message
     assert second.ok
     assert "status=completed" in second.message
-    assert "next_offset=4/4" in second.message
+    assert "tasks_success=2/2" in second.message
 
     sqlite_path = tmp_path / "data" / "metadata.sqlite"
     with sqlite3.connect(sqlite_path) as connection:
@@ -911,10 +911,24 @@ def test_run_cyq_perf_batches_resumes_from_saved_offset(tmp_path: Path, monkeypa
         batch_rows = connection.execute(
             "SELECT batch_id, row_count FROM data_batches WHERE dataset_name = 'cyq_perf' ORDER BY batch_id"
         ).fetchall()
+        tasks = connection.execute(
+            """
+            SELECT dataset_name, task_type, start_date, end_date, symbol_start_offset,
+                   symbol_end_offset, status, row_count, raw_batch_id
+            FROM provider_run_tasks
+            WHERE run_id = 'cyq_test_run'
+            ORDER BY symbol_start_offset
+            """
+        ).fetchall()
 
-    assert run[0:5] == ("completed", 4, 4, 4, 4)
+    assert run[0] == "completed"
+    assert run[4] == 4
     assert json.loads(run[5]) == ["tushare_cyq_perf_20260428_001", "tushare_cyq_perf_20260428_002"]
     assert batch_rows == [("tushare_cyq_perf_20260428_001", 2), ("tushare_cyq_perf_20260428_002", 2)]
+    assert tasks == [
+        ("cyq_perf", "cyq_perf_symbol_batch", "2026-04-26", "2026-04-28", 0, 2, "success", 2, "tushare_cyq_perf_20260428_001"),
+        ("cyq_perf", "cyq_perf_symbol_batch", "2026-04-26", "2026-04-28", 2, 4, "success", 2, "tushare_cyq_perf_20260428_002"),
+    ]
 
 
 def test_run_cyq_perf_batches_reports_progress(tmp_path: Path, monkeypatch) -> None:
@@ -965,11 +979,11 @@ def test_run_cyq_perf_batches_reports_progress(tmp_path: Path, monkeypatch) -> N
 
     assert result.ok
     assert len(progress_messages) == 2
-    assert "this_invocation_batches=1/2" in progress_messages[0]
-    assert "next_offset=2/4" in progress_messages[0]
-    assert "last_batch=tushare_cyq_perf_20260428_001" in progress_messages[0]
-    assert "this_invocation_batches=2/2" in progress_messages[1]
-    assert "next_offset=4/4" in progress_messages[1]
+    assert "this_invocation=1/2" in progress_messages[0]
+    assert "total_success=1/2" in progress_messages[0]
+    assert "last=cyq_perf/2026-04-26-2026-04-28 symbols=0-2" in progress_messages[0]
+    assert "this_invocation=2/2" in progress_messages[1]
+    assert "total_success=2/2" in progress_messages[1]
     assert "status=completed" in result.message
     assert "recent_raw_batches=tushare_cyq_perf_20260428_001, tushare_cyq_perf_20260428_002" in result.message
 
@@ -1026,7 +1040,7 @@ def test_run_cyq_perf_batches_retries_rate_limit_error(tmp_path: Path, monkeypat
 
     assert result.ok
     assert calls == {"000001.SZ": 2, "000002.SZ": 1}
-    assert "next_offset=2/2" in result.message
+    assert "tasks_success=1/1" in result.message
     sqlite_path = tmp_path / "data" / "metadata.sqlite"
     with sqlite3.connect(sqlite_path) as connection:
         run = connection.execute(
@@ -1036,7 +1050,92 @@ def test_run_cyq_perf_batches_retries_rate_limit_error(tmp_path: Path, monkeypat
             WHERE run_id = 'cyq_retry_test'
             """
         ).fetchone()
-    assert run == ("completed", 2, 2, 0, 2)
+        task = connection.execute(
+            """
+            SELECT status, attempts, error_reason, row_count, raw_batch_id
+            FROM provider_run_tasks
+            WHERE run_id = 'cyq_retry_test'
+            """
+        ).fetchone()
+    assert run == ("completed", 1, 1, 0, 2)
+    assert task == ("success", 2, None, 2, "tushare_cyq_perf_20260428_001")
+
+
+def test_run_cyq_perf_batches_stops_non_retryable_failure_without_partial_raw(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    security_path = tmp_path / "data" / "curated" / "current" / "security_master" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ", "000004.SZ"],
+            "status": ["active", "active", "active"],
+        }
+    ).write_parquet(security_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, ts_code, start_date=None, end_date=None):
+            if ts_code == "000002.SZ":
+                raise Exception("provider internal error")
+            return pl.DataFrame(
+                {
+                    "ts_code": [ts_code],
+                    "trade_date": [end_date],
+                    "winner_rate": [80.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = run_cyq_perf_batches(
+        config_path=config_path,
+        run_id="cyq_strict_failure_test",
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        batch_size=2,
+        max_batches=2,
+        retry=1,
+        retry_wait_seconds=0,
+    )
+
+    assert not result.ok
+    assert "reason=unknown" in result.message
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        batches = connection.execute(
+            "SELECT batch_id FROM data_batches WHERE dataset_name = 'cyq_perf'"
+        ).fetchall()
+        tasks = connection.execute(
+            """
+            SELECT symbol_start_offset, symbol_end_offset, status, attempts, error_reason, retryable, row_count, raw_batch_id
+            FROM provider_run_tasks
+            WHERE run_id = 'cyq_strict_failure_test'
+            ORDER BY symbol_start_offset
+            """
+        ).fetchall()
+        run = connection.execute(
+            """
+            SELECT status, requested_symbols, symbols_with_rows, failed_symbols, row_count, raw_batch_ids
+            FROM provider_runs
+            WHERE run_id = 'cyq_strict_failure_test'
+            """
+        ).fetchone()
+    assert batches == []
+    assert tasks == [
+        (0, 2, "failed", 1, "unknown", 0, 0, None),
+        (2, 3, "pending", 0, None, None, 0, None),
+    ]
+    assert run == ("failed", 0, 0, 1, 0, "[]")
 
 
 def test_run_market_daily_resumes_by_trade_date_tasks(tmp_path: Path, monkeypatch) -> None:
@@ -1300,7 +1399,7 @@ def test_run_market_daily_reports_progress(tmp_path: Path, monkeypatch) -> None:
     assert "last=daily_prices/2026-04-27" in progress_messages[0]
     assert "this_invocation=2/2" in progress_messages[1]
     assert "status=completed" in result.message
-    assert "batches_this_run=2" in result.message
+    assert "tasks_this_run=2" in result.message
     assert "recent_raw_batches=tushare_daily_prices_20260428_001, tushare_daily_prices_20260428_002" in result.message
 
 

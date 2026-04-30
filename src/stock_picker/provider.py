@@ -15,6 +15,16 @@ from typing import Callable
 import polars as pl
 
 from stock_picker.config import load_storage_config
+from stock_picker.provider_run_engine import (
+    ProviderErrorReason,
+    ProviderRunResult,
+    ProviderRunSpec,
+    ProviderTaskError,
+    ProviderTaskSpec,
+    TaskExecutionResult,
+    classify_tushare_error,
+    execute_provider_run,
+)
 from stock_picker.storage import initialize_metadata_catalog
 
 
@@ -236,81 +246,37 @@ def run_cyq_perf_batches(
     if not all_symbols:
         return ProviderFetchResult(False, "cyq_perf run found no symbols to fetch")
 
-    run = _load_or_create_provider_run(
-        config.metadata_sqlite_path,
+    selected_run_id = run_id or f"{source}_cyq_perf_{(as_of_date or end_date or start_date or datetime.now(UTC).date().isoformat()).replace('-', '')}_run"
+    run_spec = ProviderRunSpec(
+        run_id=selected_run_id,
         source=source,
-        dataset="cyq_perf",
-        run_id=run_id,
+        run_type="cyq_perf",
         start_date=start_date,
         end_date=end_date,
         as_of_date=as_of_date or end_date or start_date or datetime.now(UTC).date().isoformat(),
-        total_symbols=len(all_symbols),
+        max_tasks=max_batches,
+        requests_per_minute=0,
+        retry=retry,
+        retry_wait_seconds=retry_wait_seconds,
+        backoff_multiplier=backoff_multiplier,
+        progress_every_tasks=progress_every_batches,
+    )
+    adapter = CyqPerfTaskAdapter(
+        config_path=config_path,
+        source=source,
+        token=token,
+        symbols=all_symbols,
         batch_size=batch_size,
+        delay_seconds=delay_seconds,
+        as_of_date=run_spec.as_of_date,
     )
-    if run["status"] == "completed":
-        return ProviderFetchResult(True, f"cyq_perf run already completed: {run['run_id']} next_offset={run['next_offset']}")
-
-    batch_results: list[ProviderFetchResult] = []
-    started_at = time.monotonic()
-    for _ in range(max_batches):
-        next_offset = int(run["next_offset"])
-        if next_offset >= len(all_symbols):
-            _mark_provider_run_completed(config.metadata_sqlite_path, str(run["run_id"]))
-            break
-        result = fetch_cyq_perf_batch(
-            config_path=config_path,
-            source=source,
-            start_date=str(run["start_date"] or "") or start_date,
-            end_date=str(run["end_date"] or "") or end_date,
-            as_of_date=str(run["as_of_date"]),
-            symbols=all_symbols,
-            limit=int(run["batch_size"]),
-            offset=next_offset,
-            delay_seconds=delay_seconds,
-            retry=retry,
-            retry_wait_seconds=retry_wait_seconds,
-            backoff_multiplier=backoff_multiplier,
-            token_env=token_env,
-        )
-        if not result.ok:
-            _update_provider_run_failure(config.metadata_sqlite_path, str(run["run_id"]), result.message)
-            return result
-        batch_results.append(result)
-        symbols_requested = min(int(run["batch_size"]), len(all_symbols) - next_offset)
-        _advance_provider_run(
-            config.metadata_sqlite_path,
-            run_id=str(run["run_id"]),
-            next_offset=next_offset + symbols_requested,
-            symbols_requested=symbols_requested,
-            symbols_with_rows=_message_int(result.message, "symbols_with_rows"),
-            failures=_message_int(result.message, "failures"),
-            row_count=result.row_count,
-            batch_id=str(result.batch_id),
-        )
-        run = _load_provider_run(config.metadata_sqlite_path, str(run["run_id"]))
-        if progress_callback and progress_every_batches and len(batch_results) % progress_every_batches == 0:
-            progress_callback(
-                _cyq_perf_progress_message(
-                    run=run,
-                    completed_batches=len(batch_results),
-                    max_batches=max_batches,
-                    elapsed_seconds=time.monotonic() - started_at,
-                    last_result=result,
-                )
-            )
-        if int(run["next_offset"]) >= len(all_symbols):
-            _mark_provider_run_completed(config.metadata_sqlite_path, str(run["run_id"]))
-            run = _load_provider_run(config.metadata_sqlite_path, str(run["run_id"]))
-            break
-
-    last = batch_results[-1] if batch_results else None
-    message = (
-        f"cyq_perf run: {run['run_id']} status={run['status']} "
-        f"next_offset={run['next_offset']}/{run['total_symbols']} "
-        f"batches={len(batch_results)} rows={run['row_count']} "
-        f"recent_raw_batches={', '.join(json.loads(str(run['raw_batch_ids']))[-5:])}"
+    result = execute_provider_run(
+        sqlite_path=config.metadata_sqlite_path,
+        run_spec=run_spec,
+        adapter=adapter,
+        progress_callback=progress_callback,
     )
-    return ProviderFetchResult(True, message, last.batch_id if last else None, last.raw_path if last else None, int(run["row_count"]))
+    return _provider_run_result_to_fetch_result("cyq_perf", result)
 
 
 def run_market_daily(
@@ -376,83 +342,216 @@ def run_market_daily(
             return ProviderFetchResult(False, "market daily run found no active symbols for moneyflow_dc")
 
     selected_run_id = run_id or f"{source}_market_daily_{_clean_date(start_date)}_{_clean_date(end_date)}"
-    task_count = _market_daily_task_count(selected_datasets, trade_dates, symbols, symbol_batch_size)
-    _load_or_create_market_daily_run(
-        config.metadata_sqlite_path,
+    run_spec = ProviderRunSpec(
         run_id=selected_run_id,
         source=source,
-        datasets=selected_datasets,
+        run_type="market_daily",
         start_date=start_date,
         end_date=end_date,
         as_of_date=as_of_date or end_date,
-        task_count=task_count,
+        max_tasks=max_tasks,
+        requests_per_minute=requests_per_minute,
+        retry=retry,
+        retry_wait_seconds=retry_wait_seconds,
+        backoff_multiplier=backoff_multiplier,
+        progress_every_tasks=progress_every_tasks,
     )
-    _ensure_market_daily_tasks(
-        config.metadata_sqlite_path,
-        run_id=selected_run_id,
+    adapter = MarketDailyTaskAdapter(
+        config_path=config_path,
         source=source,
+        token=token,
         datasets=selected_datasets,
         trade_dates=trade_dates,
         symbols=symbols,
         symbol_batch_size=symbol_batch_size,
+        as_of_date=as_of_date or end_date,
     )
+    result = execute_provider_run(
+        sqlite_path=config.metadata_sqlite_path,
+        run_spec=run_spec,
+        adapter=adapter,
+        progress_callback=progress_callback,
+    )
+    return _provider_run_result_to_fetch_result("market daily", result)
 
-    completed: list[ProviderFetchResult] = []
-    last_request_at: float | None = None
-    started_at = time.monotonic()
-    for _ in range(max_tasks):
-        task = _next_market_daily_task(config.metadata_sqlite_path, selected_run_id)
-        if task is None:
-            _mark_provider_run_completed(config.metadata_sqlite_path, selected_run_id)
-            break
-        result, last_request_at = _run_market_daily_task(
-            config_path=config_path,
-            sqlite_path=config.metadata_sqlite_path,
-            task=task,
-            token=token,
-            symbols=symbols,
-            as_of_date=as_of_date or end_date,
-            retry=retry,
-            retry_wait_seconds=retry_wait_seconds,
-            backoff_multiplier=backoff_multiplier,
-            requests_per_minute=requests_per_minute,
-            last_request_at=last_request_at,
-        )
+
+class MarketDailyTaskAdapter:
+    def __init__(
+        self,
+        config_path: Path,
+        source: str,
+        token: str,
+        datasets: list[str],
+        trade_dates: list[str],
+        symbols: list[str],
+        symbol_batch_size: int,
+        as_of_date: str,
+    ) -> None:
+        self.config_path = config_path
+        self.source = source
+        self.token = token
+        self.datasets = datasets
+        self.trade_dates = trade_dates
+        self.symbols = symbols
+        self.symbol_batch_size = symbol_batch_size
+        self.as_of_date = as_of_date
+
+    def plan_tasks(self, run_spec: ProviderRunSpec) -> list[ProviderTaskSpec]:
+        tasks: list[ProviderTaskSpec] = []
+        for dataset in self.datasets:
+            for trade_date in self.trade_dates:
+                if dataset == "moneyflow_dc":
+                    for start_offset in range(0, len(self.symbols), self.symbol_batch_size):
+                        end_offset = min(start_offset + self.symbol_batch_size, len(self.symbols))
+                        tasks.append(
+                            ProviderTaskSpec(
+                                task_id=_provider_task_id(run_spec.run_id, dataset, trade_date, start_offset, end_offset),
+                                run_id=run_spec.run_id,
+                                source=self.source,
+                                dataset_name=dataset,
+                                task_type="market_daily_symbol_batch",
+                                trade_date=trade_date,
+                                symbol_start_offset=start_offset,
+                                symbol_end_offset=end_offset,
+                                payload={"symbol_count": end_offset - start_offset},
+                            )
+                        )
+                else:
+                    tasks.append(
+                        ProviderTaskSpec(
+                            task_id=_provider_task_id(run_spec.run_id, dataset, trade_date, None, None),
+                            run_id=run_spec.run_id,
+                            source=self.source,
+                            dataset_name=dataset,
+                            task_type="market_daily_date",
+                            trade_date=trade_date,
+                        )
+                    )
+        return tasks
+
+    def execute_task(self, task: dict[str, object]) -> TaskExecutionResult:
+        try:
+            ts_code = _task_symbol_list(task, self.symbols)
+            frame = _fetch_tushare_dataset(
+                token=self.token,
+                dataset=str(task["dataset_name"]),
+                start_date=None,
+                end_date=None,
+                ts_code=ts_code,
+                trade_date=str(task["trade_date"]),
+            )
+            result = write_raw_batch(
+                config_path=self.config_path,
+                source=str(task["source"]),
+                dataset=str(task["dataset_name"]),
+                frame=frame,
+                as_of_date=self.as_of_date,
+            )
+        except ModuleNotFoundError:
+            return TaskExecutionResult(
+                False,
+                error=ProviderTaskError(ProviderErrorReason.PROVIDER_UNAVAILABLE, "missing dependency: install tushare to fetch provider data", retryable=False),
+            )
+        except Exception as error:
+            return TaskExecutionResult(False, error=classify_tushare_error(error))
         if not result.ok:
-            _update_provider_run_failure(config.metadata_sqlite_path, selected_run_id, result.message)
-            return result
-        completed.append(result)
-        if progress_callback and progress_every_tasks and len(completed) % progress_every_tasks == 0:
-            progress_callback(
-                _market_daily_progress_message(
-                    sqlite_path=config.metadata_sqlite_path,
-                    run_id=selected_run_id,
-                    completed_this_invocation=len(completed),
-                    max_tasks=max_tasks,
-                    elapsed_seconds=time.monotonic() - started_at,
-                    last_task=task,
-                    last_result=result,
+            return TaskExecutionResult(False, error=ProviderTaskError(ProviderErrorReason.UNKNOWN, result.message, retryable=False))
+        return TaskExecutionResult(True, result.batch_id, result.raw_path, result.row_count)
+
+
+class CyqPerfTaskAdapter:
+    def __init__(
+        self,
+        config_path: Path,
+        source: str,
+        token: str,
+        symbols: list[str],
+        batch_size: int,
+        delay_seconds: float,
+        as_of_date: str,
+    ) -> None:
+        self.config_path = config_path
+        self.source = source
+        self.token = token
+        self.symbols = symbols
+        self.batch_size = batch_size
+        self.delay_seconds = delay_seconds
+        self.as_of_date = as_of_date
+
+    def plan_tasks(self, run_spec: ProviderRunSpec) -> list[ProviderTaskSpec]:
+        tasks: list[ProviderTaskSpec] = []
+        for start_offset in range(0, len(self.symbols), self.batch_size):
+            end_offset = min(start_offset + self.batch_size, len(self.symbols))
+            tasks.append(
+                ProviderTaskSpec(
+                    task_id=_provider_task_id(run_spec.run_id, "cyq_perf", run_spec.as_of_date, start_offset, end_offset),
+                    run_id=run_spec.run_id,
+                    source=self.source,
+                    dataset_name="cyq_perf",
+                    task_type="cyq_perf_symbol_batch",
+                    symbol_start_offset=start_offset,
+                    symbol_end_offset=end_offset,
+                    start_date=run_spec.start_date,
+                    end_date=run_spec.end_date,
+                    payload={"symbol_count": end_offset - start_offset},
                 )
             )
+        return tasks
 
-    stats = _market_daily_run_stats(config.metadata_sqlite_path, selected_run_id)
-    if stats["remaining"] == 0:
-        _mark_provider_run_completed(config.metadata_sqlite_path, selected_run_id)
-        status = "completed"
-    else:
-        status = "running"
-    _update_market_daily_run_summary(config.metadata_sqlite_path, selected_run_id, status=status)
-    batch_ids = [str(result.batch_id) for result in completed if result.batch_id]
-    recent_batches = batch_ids[-5:]
-    message = (
-        f"market daily run: {selected_run_id} status={status} "
-        f"tasks_success={stats['success']}/{stats['total']} "
-        f"tasks_failed={stats['failed']} tasks_remaining={stats['remaining']} "
-        f"rows={stats['rows']} batches_this_run={len(batch_ids)} "
-        f"recent_raw_batches={', '.join(recent_batches)}"
-    )
-    last = completed[-1] if completed else None
-    return ProviderFetchResult(True, message, last.batch_id if last else None, last.raw_path if last else None, int(stats["rows"]))
+    def execute_task(self, task: dict[str, object]) -> TaskExecutionResult:
+        try:
+            import tushare as ts  # type: ignore[import-not-found]
+        except ModuleNotFoundError:
+            return TaskExecutionResult(
+                False,
+                error=ProviderTaskError(ProviderErrorReason.PROVIDER_UNAVAILABLE, "missing dependency: install tushare to fetch provider data", retryable=False),
+            )
+
+        start = int(task["symbol_start_offset"])
+        end = int(task["symbol_end_offset"])
+        selected_symbols = self.symbols[start:end]
+        frames: list[pl.DataFrame] = []
+        pro = ts.pro_api(self.token)
+        for index, symbol in enumerate(selected_symbols):
+            try:
+                frame = _fetch_tushare_cyq_perf_for_symbol(
+                    pro,
+                    symbol,
+                    str(task["start_date"] or "") or None,
+                    str(task["end_date"] or "") or None,
+                )
+            except Exception as error:
+                return TaskExecutionResult(False, error=classify_tushare_error(error))
+            if frame.is_empty():
+                return TaskExecutionResult(
+                    False,
+                    error=ProviderTaskError(
+                        ProviderErrorReason.EMPTY_RESULT,
+                        f"cyq_perf returned no rows for symbol: {symbol}",
+                        retryable=False,
+                    ),
+                )
+            frames.append(frame)
+            if self.delay_seconds and index < len(selected_symbols) - 1:
+                time.sleep(self.delay_seconds)
+
+        combined = pl.concat(frames, how="diagonal_relaxed")
+        result = write_raw_batch(
+            config_path=self.config_path,
+            source=str(task["source"]),
+            dataset="cyq_perf",
+            frame=combined,
+            as_of_date=self.as_of_date,
+        )
+        if not result.ok:
+            return TaskExecutionResult(False, error=ProviderTaskError(ProviderErrorReason.UNKNOWN, result.message, retryable=False))
+        return TaskExecutionResult(True, result.batch_id, result.raw_path, result.row_count)
+
+
+def _provider_run_result_to_fetch_result(label: str, result: ProviderRunResult) -> ProviderFetchResult:
+    if not result.ok:
+        return ProviderFetchResult(False, result.message, result.last_raw_batch_id, None, result.row_count)
+    return ProviderFetchResult(True, result.message.replace("provider run:", f"{label} run:"), result.last_raw_batch_id, None, result.row_count)
 
 
 def probe_provider_api(
@@ -1076,6 +1175,14 @@ def _task_ts_code(task: dict[str, object], symbols: list[str]) -> str | None:
     return ",".join(selected)
 
 
+def _task_symbol_list(task: dict[str, object], symbols: list[str]) -> str | None:
+    start = task.get("symbol_start_offset")
+    end = task.get("symbol_end_offset")
+    if start is None or end is None:
+        return None
+    return ",".join(symbols[int(start) : int(end)])
+
+
 def _throttle_request(requests_per_minute: float, last_request_at: float | None) -> float:
     if requests_per_minute <= 0:
         return time.monotonic()
@@ -1111,6 +1218,16 @@ def _market_daily_task_id(
     if symbol_start_offset is None or symbol_end_offset is None:
         return base
     return f"{base}:{symbol_start_offset}-{symbol_end_offset}"
+
+
+def _provider_task_id(
+    run_id: str,
+    dataset: str,
+    date_value: str,
+    symbol_start_offset: int | None,
+    symbol_end_offset: int | None,
+) -> str:
+    return _market_daily_task_id(run_id, dataset, date_value, symbol_start_offset, symbol_end_offset)
 
 
 def _parse_iso_date(value: str) -> date:

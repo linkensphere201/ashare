@@ -165,7 +165,7 @@ flowchart TD
 The data store is layered:
 
 - Raw provider responses are stored as CSV batches under `data/raw/` and registered in `data_batches`.
-- Large provider pulls can be tracked as resumable tasks in `provider_runs` and `provider_run_tasks`.
+- Large provider pulls are tracked as resumable tasks in `provider_runs` and `provider_run_tasks`. The shared run engine owns task state, retry/backoff, throttling, progress output, and failure recording; dataset adapters only plan and fetch tasks.
 - Standardized current datasets are stored as Parquet under `data/curated/current/` and registered in `curated_versions`.
 - Raw batches may overlap. Curated promotion is idempotent by each dataset's primary key; current Parquet keeps one row per key, while `curated_versions.source_batch_ids` and `curated_versions.notes` record promoted batch lineage and last-promotion overlap counts.
 - Snapshots are logical manifests in `snapshot_manifests`; they point to exact curated versions for reproducible strategy and backtest runs.
@@ -223,13 +223,13 @@ stock-picker provider fetch-cyq-perf-batch --config config/storage.yaml --start-
 
 Use a small `--limit` first. The command loops through symbols, calls Tushare `cyq_perf`, combines successful rows into one raw `cyq_perf` batch, and records it in `data_batches`.
 
-For larger pulls, use the resumable run command. It stores progress in `metadata.sqlite.provider_runs` and continues from `next_offset` when run again with the same `--run-id`:
+For larger pulls, use the resumable run command. It stores symbol-batch tasks in `metadata.sqlite.provider_run_tasks` and continues unfinished tasks when run again with the same `--run-id`:
 
 ```powershell
 stock-picker provider run-cyq-perf-batches --config config/storage.yaml --run-id cyq_20260428 --start-date 2026-04-26 --end-date 2026-04-28 --as-of-date 2026-04-28 --batch-size 100 --max-batches 1 --delay-seconds 0.35 --retry 3 --retry-wait-seconds 60 --backoff-multiplier 2 --progress-every-batches 1
 ```
 
-Run the same command again to continue the next batch. Increase `--max-batches` only after confirming provider rate limits are safe. `cyq_perf` has shown a 200 requests/minute provider limit in real runs, so keep `--delay-seconds` below that limit and use retry/backoff for transient rate-limit responses. Tune progress output with `--progress-every-batches`; set it to `0` to disable progress lines.
+Run the same command again to continue the next task. Increase `--max-batches` only after confirming provider rate limits are safe. `cyq_perf` has shown a 200 requests/minute provider limit in real runs, so keep `--delay-seconds` below that limit and use retry/backoff for transient rate-limit responses. Retry/backoff is only applied to normalized retryable provider errors such as rate limits; non-retryable provider errors fail the task and stop the run. A `cyq_perf` task writes raw data only after every symbol in that task succeeds, so partial task results are not promoted as successful progress. Tune progress output with `--progress-every-batches`; set it to `0` to disable progress lines.
 
 Promote raw batches into curated current Parquet:
 
@@ -329,7 +329,7 @@ stock-picker storage check-quality --config config/storage.yaml --dataset daily_
 | `stock-picker provider probe` | Run a small Tushare API request and check expected fields |
 | `stock-picker provider fetch` | Fetch a Tushare dataset into raw CSV storage and record metadata |
 | `stock-picker provider fetch-cyq-perf-batch` | Fetch Tushare `cyq_perf` for multiple symbols into one raw batch |
-| `stock-picker provider run-cyq-perf-batches` | Resume a multi-batch `cyq_perf` provider run from stored `next_offset` |
+| `stock-picker provider run-cyq-perf-batches` | Resume multi-task `cyq_perf` provider runs from `provider_run_tasks` |
 | `stock-picker provider run-market-daily` | Resume full-market `daily_prices` / `moneyflow_dc` pulls by trading-date tasks |
 
 Supported probe APIs:
