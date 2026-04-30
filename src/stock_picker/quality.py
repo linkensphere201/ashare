@@ -222,7 +222,11 @@ def _warnings_for_dataset(check: dict[str, object]) -> list[str]:
     warnings: list[str] = []
     overlap_keys = int(overlap.get("overlap_keys") or 0)
     incoming_duplicate_keys = int(overlap.get("incoming_duplicate_keys") or 0)
-    last_batch = str(parsed.get("last_promoted_batch_id") or "unknown")
+    last_batch = str(
+        parsed.get("last_promoted_batch_id")
+        or parsed.get("last_promoted_run_id")
+        or "unknown"
+    )
     if overlap_keys:
         warnings.append(f"last promoted batch {last_batch} overlapped {overlap_keys} existing primary keys")
     if incoming_duplicate_keys:

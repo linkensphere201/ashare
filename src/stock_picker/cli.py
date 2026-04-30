@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 import sys
 
-from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
+from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily
 from stock_picker.quality import check_curated_quality
@@ -173,6 +173,14 @@ def build_parser() -> argparse.ArgumentParser:
     promote_raw_cmd.add_argument("--batch-id", help="Exact raw batch id to promote")
     promote_raw_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
+    promote_raw_run_cmd = storage_subparsers.add_parser(
+        "promote-raw-run",
+        help="Promote all successful raw batches from one provider run into curated current stores",
+    )
+    promote_raw_run_cmd.add_argument("--run-id", required=True, help="Provider run id")
+    promote_raw_run_cmd.add_argument("--dataset", help="Optional raw dataset filter, such as daily_prices")
+    promote_raw_run_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
     inspect_curated_cmd = storage_subparsers.add_parser(
         "inspect-curated",
         help="Inspect the current curated Parquet store and metadata for one dataset",
@@ -281,6 +289,18 @@ def main(argv: list[str] | None = None) -> int:
             dataset=args.dataset,
             as_of_date=args.as_of_date,
             batch_id=args.batch_id,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "storage" and args.storage_command == "promote-raw-run":
+        result = promote_raw_run(
+            config_path=Path(args.config),
+            run_id=args.run_id,
+            dataset=args.dataset,
         )
         if result.ok:
             print(result.message)

@@ -211,6 +211,77 @@ def promote_raw_batch(
     )
 
 
+def promote_raw_run(
+    config_path: Path,
+    run_id: str,
+    dataset: str | None = None,
+) -> CuratedImportResult:
+    config = load_storage_config(config_path)
+    initialize_metadata_catalog(config.metadata_sqlite_path)
+    batches = _load_raw_batches_for_run(config.metadata_sqlite_path, run_id, dataset)
+    if not batches:
+        selector = f"{run_id}/{dataset or 'all'}"
+        return CuratedImportResult(False, f"raw run batches not found: {selector}")
+
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for batch in batches:
+        grouped.setdefault(str(batch["dataset_name"]), []).append(batch)
+
+    results: list[CuratedImportResult] = []
+    for raw_dataset, raw_batches in grouped.items():
+        curated_dataset = RAW_TO_CURATED_DATASET.get(raw_dataset)
+        if curated_dataset is None:
+            return CuratedImportResult(False, f"no curated mapping for raw dataset: {raw_dataset}")
+        schema = _load_registered_schema(config, curated_dataset)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        data_version = str(raw_batches[-1]["business_date"] or now[:10])
+        mapped_frames: list[pl.DataFrame] = []
+        incoming_batch_ids: list[str] = []
+        for batch in raw_batches:
+            raw_path = Path(str(batch["raw_path"]))
+            if not raw_path.exists():
+                return CuratedImportResult(False, f"raw batch file not found: {raw_path}")
+            incoming_batch_ids.append(str(batch["batch_id"]))
+            raw_frame = pl.read_csv(raw_path)
+            mapped = _map_tushare_raw_to_curated(raw_frame, raw_dataset)
+            mapped = _enrich_frame(mapped, schema, str(batch["source"]), str(batch["batch_id"]), data_version, now)
+            mapped = _fill_missing_nullable_columns(mapped, schema)
+            mapped_frames.append(mapped)
+
+        combined = pl.concat(mapped_frames, how="diagonal_relaxed")
+        primary_keys = _primary_key_columns(schema)
+        overlap_summary = _current_overlap_summary(config, curated_dataset, combined, primary_keys)
+        combined = _merge_with_existing_current(config, curated_dataset, combined, schema)
+        validation_error = _validate_required_columns(combined, schema)
+        if validation_error:
+            return CuratedImportResult(False, validation_error)
+        existing_source_batch_ids = _load_current_source_batch_ids(config.metadata_sqlite_path, curated_dataset)
+        source_batch_ids = _merge_source_batch_ids(existing_source_batch_ids, incoming_batch_ids)
+        results.append(
+            _write_curated_current(
+                config=config,
+                dataset_id=curated_dataset,
+                frame=combined,
+                schema=schema,
+                as_of_date=data_version,
+                source_batch_ids=source_batch_ids,
+                created_at=now,
+                notes=_curated_bulk_notes(
+                    run_id=run_id,
+                    raw_dataset=raw_dataset,
+                    source_batch_ids=incoming_batch_ids,
+                    overlap_summary=overlap_summary,
+                ),
+            )
+        )
+
+    if len(results) == 1:
+        return results[0]
+    total_rows = sum(result.row_count for result in results)
+    message = "promoted raw run: " + "; ".join(result.message for result in results)
+    return CuratedImportResult(True, message, results[-1].output_path, total_rows)
+
+
 def inspect_curated(config_path: Path, dataset_id: str) -> CuratedInspectionResult:
     config = load_storage_config(config_path)
     initialize_metadata_catalog(config.metadata_sqlite_path)
@@ -448,6 +519,45 @@ def _load_raw_batch(
     }
 
 
+def _load_raw_batches_for_run(
+    sqlite_path: Path,
+    run_id: str,
+    dataset: str | None,
+) -> list[dict[str, object]]:
+    with sqlite3.connect(sqlite_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+              db.batch_id,
+              db.source,
+              db.dataset_name,
+              db.business_date,
+              db.raw_path,
+              prt.trade_date,
+              prt.symbol_start_offset
+            FROM provider_run_tasks prt
+            JOIN data_batches db ON db.batch_id = prt.raw_batch_id
+            WHERE prt.run_id = ?
+              AND prt.status = 'success'
+              AND prt.raw_batch_id IS NOT NULL
+              AND db.status = 'success'
+              AND (? IS NULL OR db.dataset_name = ?)
+            ORDER BY db.dataset_name, COALESCE(prt.trade_date, ''), COALESCE(prt.symbol_start_offset, -1), db.batch_id
+            """,
+            (run_id, dataset, dataset),
+        ).fetchall()
+    return [
+        {
+            "batch_id": batch_id,
+            "source": source,
+            "dataset_name": dataset_name,
+            "business_date": business_date,
+            "raw_path": raw_path,
+        }
+        for batch_id, source, dataset_name, business_date, raw_path, _trade_date, _symbol_start_offset in rows
+    ]
+
+
 def _map_tushare_raw_to_curated(frame: pl.DataFrame, dataset: str) -> pl.DataFrame:
     if dataset == "security_master":
         return frame.with_columns(
@@ -612,10 +722,11 @@ def _current_overlap_summary(
             "overlap_keys": 0,
         }
     existing = pl.read_parquet(output_path)
+    incoming_keys = frame.select([pl.col(column).cast(pl.Utf8).alias(column) for column in primary_keys]).unique()
+    existing_keys = existing.select([pl.col(column).cast(pl.Utf8).alias(column) for column in primary_keys]).unique()
     overlap_keys = (
-        frame.select(primary_keys)
-        .unique()
-        .join(existing.select(primary_keys).unique(), on=primary_keys, how="inner")
+        incoming_keys
+        .join(existing_keys, on=primary_keys, how="inner")
         .height
     )
     return {
@@ -676,6 +787,26 @@ def _curated_notes(
         {
             "last_promoted_batch_id": source_batch_id,
             "last_promoted_raw_dataset": raw_dataset,
+            "last_promote_overlap": overlap_summary,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _curated_bulk_notes(
+    run_id: str,
+    raw_dataset: str,
+    source_batch_ids: list[str],
+    overlap_summary: dict[str, object],
+) -> str:
+    return json.dumps(
+        {
+            "last_promoted_run_id": run_id,
+            "last_promoted_raw_dataset": raw_dataset,
+            "last_promoted_batch_count": len(source_batch_ids),
+            "last_promoted_first_batch_id": source_batch_ids[0] if source_batch_ids else None,
+            "last_promoted_last_batch_id": source_batch_ids[-1] if source_batch_ids else None,
             "last_promote_overlap": overlap_summary,
         },
         ensure_ascii=False,

@@ -5,7 +5,7 @@ import sqlite3
 
 import polars as pl
 
-from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
+from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
 import stock_picker.provider as provider_module
 from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily, write_raw_batch
@@ -520,6 +520,114 @@ def test_promote_raw_records_overlap_notes_and_quality_warning(tmp_path: Path) -
     assert quality.ok
     assert "quality warnings:" in quality.message
     assert "overlapped 1 existing primary keys" in quality.message
+
+
+def test_promote_raw_run_merges_all_successful_task_batches(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    _write_daily_prices_schema(
+        tmp_path,
+        extra_fields=[
+            ("asset_type", "string", False),
+            ("open", "double", True),
+            ("high", "double", True),
+            ("low", "double", True),
+            ("close", "double", True),
+            ("pre_close", "double", True),
+            ("volume", "double", True),
+            ("amount", "double", True),
+            ("pct_change", "double", True),
+            ("trade_year", "integer", False),
+            ("trade_month", "integer", False),
+            ("source", "string", False),
+            ("source_batch_id", "string", False),
+            ("data_version", "string", False),
+            ("created_at", "datetime", False),
+        ],
+    )
+    assert init_storage(config_path).ok
+    assert register_schemas(config_path).ok
+
+    first = write_raw_batch(
+        config_path,
+        "tushare",
+        "daily_prices",
+        pl.DataFrame(
+            {
+                "ts_code": ["600519.SH"],
+                "trade_date": ["20260427"],
+                "open": [10.0],
+                "high": [11.0],
+                "low": [9.0],
+                "close": [10.5],
+                "pre_close": [10.0],
+                "vol": [100.0],
+                "amount": [1000.0],
+                "pct_chg": [5.0],
+            }
+        ),
+        "2026-04-28",
+    )
+    second = write_raw_batch(
+        config_path,
+        "tushare",
+        "daily_prices",
+        pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20260428"],
+                "open": [20.0],
+                "high": [21.0],
+                "low": [19.0],
+                "close": [20.5],
+                "pre_close": [20.0],
+                "vol": [200.0],
+                "amount": [2000.0],
+                "pct_chg": [2.5],
+            }
+        ),
+        "2026-04-28",
+    )
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO provider_runs (
+              run_id, source, dataset_name, start_date, end_date, as_of_date, status,
+              total_symbols, next_offset, batch_size, requested_symbols, symbols_with_rows,
+              failed_symbols, row_count, raw_batch_ids, failure_json, created_at, updated_at, notes
+            )
+            VALUES ('bulk_promote_test', 'tushare', 'market_daily', '2026-04-27', '2026-04-28', '2026-04-28', 'completed',
+              2, 2, 0, 2, 2, 0, 2, '[]', '[]', '2026-04-28T00:00:00+00:00', '2026-04-28T00:00:00+00:00', NULL)
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO provider_run_tasks (
+              task_id, run_id, source, dataset_name, task_type, trade_date,
+              symbol_start_offset, symbol_end_offset, start_date, end_date, payload_json,
+              status, attempts, raw_batch_id, row_count, error_reason, error_message,
+              provider_message, retryable, created_at, updated_at, started_at, finished_at, notes
+            )
+            VALUES (?, 'bulk_promote_test', 'tushare', 'daily_prices', 'market_daily_date', ?,
+              NULL, NULL, NULL, NULL, '{}', 'success', 1, ?, 1, NULL, NULL, NULL, NULL,
+              '2026-04-28T00:00:00+00:00', '2026-04-28T00:00:00+00:00', NULL, NULL, NULL)
+            """,
+            [
+                ("bulk_promote_test:daily_prices:20260427", "2026-04-27", first.batch_id),
+                ("bulk_promote_test:daily_prices:20260428", "2026-04-28", second.batch_id),
+            ],
+        )
+
+    result = promote_raw_run(config_path, "bulk_promote_test", "daily_prices")
+
+    assert result.ok
+    assert result.row_count == 2
+    assert result.output_path is not None
+    frame = pl.read_parquet(result.output_path).sort(["trade_date", "symbol"])
+    assert frame.select("symbol", "trade_date", "close", "source_batch_id").to_dicts() == [
+        {"symbol": "600519.SH", "trade_date": date(2026, 4, 27), "close": 10.5, "source_batch_id": first.batch_id},
+        {"symbol": "000001.SZ", "trade_date": date(2026, 4, 28), "close": 20.5, "source_batch_id": second.batch_id},
+    ]
 
 
 def test_promote_tushare_security_master_adds_market_fields(tmp_path: Path) -> None:

@@ -307,6 +307,7 @@ The output is a research/watchlist result, not direct buy or sell advice.
 | `stock-picker storage register-schemas` | Register schema YAML files into SQLite catalog tables |
 | `stock-picker storage import-curated-csv` | Import a local CSV into curated current Parquet |
 | `stock-picker storage promote-raw` | Promote a raw provider batch into curated current Parquet |
+| `stock-picker storage promote-raw-run` | Promote all successful raw batches from one provider run into curated current Parquet |
 | `stock-picker storage inspect-curated` | Inspect current curated metadata and Parquet columns for one dataset |
 | `stock-picker storage preview-curated` | Preview standard-layer rows, with stock name, daily percentage change, price, and optional selected fields |
 | `stock-picker storage list-runs` | List raw data import runs and their row counts/status |
@@ -319,6 +320,7 @@ Useful examples:
 
 ```powershell
 stock-picker storage inspect-curated --config config/storage.yaml --dataset daily_prices
+stock-picker storage promote-raw-run --config config/storage.yaml --run-id market_daily_1y_split_20260428
 stock-picker storage check-quality --config config/storage.yaml --dataset daily_prices
 ```
 
