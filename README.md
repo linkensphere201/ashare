@@ -175,6 +175,8 @@ Preview curated standard-layer rows as a PrettyTable:
 stock-picker storage preview-curated --config config/storage.yaml --dataset daily_prices --symbol 600519.SH --limit 20
 ```
 
+The default daily price preview joins `security_master` when available, so it can show stock name, Chinese market segment name, area, industry, trade date, daily percentage change, and close price.
+
 List raw data import runs as a PrettyTable:
 
 ```powershell

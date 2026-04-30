@@ -42,6 +42,30 @@ fields:
     primary_key: false
     partition_key: false
     description: Board or market type.
+  - name: market_segment
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Standardized market segment, such as sh_main, sz_main, star, chinext, or bj.
+  - name: market_segment_name
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Human-readable Chinese market segment name, such as 上证主板, 深市主板, 科创板, 创业板, or 北交所.
+  - name: area
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Source-provided issuer region.
+  - name: industry
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Source-provided industry classification.
   - name: list_date
     type: date
     nullable: true

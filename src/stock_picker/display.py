@@ -54,7 +54,9 @@ def preview_curated(
     frame = _join_security_name(config, frame, requested_columns)
     missing_columns = [column for column in requested_columns if column not in frame.columns]
     if missing_columns:
-        return DisplayResult(False, "preview failed; missing columns: " + ", ".join(missing_columns))
+        if columns:
+            return DisplayResult(False, "preview failed; missing columns: " + ", ".join(missing_columns))
+        requested_columns = [column for column in requested_columns if column in frame.columns]
 
     sort_columns = [column for column in [date_column, "symbol"] if column in frame.columns]
     if sort_columns:
@@ -261,7 +263,17 @@ def _parse_columns(columns: str) -> list[str]:
 
 def _default_preview_columns(dataset_id: str, frame: pl.DataFrame) -> list[str]:
     if dataset_id == "daily_prices":
-        return [column for column in ["symbol", "name", "trade_date", "pct_change", "close"] if column == "name" or column in frame.columns]
+        return [
+            column
+            for column in ["symbol", "name", "market_segment_name", "area", "industry", "trade_date", "pct_change", "close"]
+            if column in {"name", "market_segment_name", "area", "industry"} or column in frame.columns
+        ]
+    if dataset_id == "security_master":
+        return [
+            column
+            for column in ["symbol", "name", "exchange", "market", "market_segment_name", "market_segment", "area", "industry", "list_date", "status"]
+            if column in frame.columns
+        ]
     if dataset_id == "capital_flow_or_chip":
         return [
             column
@@ -272,12 +284,21 @@ def _default_preview_columns(dataset_id: str, frame: pl.DataFrame) -> list[str]:
 
 
 def _join_security_name(config, frame: pl.DataFrame, requested_columns: list[str]) -> pl.DataFrame:
-    if "name" not in requested_columns or "name" in frame.columns or "symbol" not in frame.columns:
+    join_columns = [
+        column
+        for column in ["name", "market_segment", "market_segment_name", "area", "industry"]
+        if column in requested_columns and column not in frame.columns
+    ]
+    if not join_columns or "symbol" not in frame.columns:
         return frame
     security_path = config.current_curated_root / "security_master" / "part-000.parquet"
     if not security_path.exists():
         return frame
-    security = pl.read_parquet(security_path, columns=["symbol", "name"])
+    available_columns = pl.read_parquet(security_path, n_rows=0).columns
+    existing_join_columns = [column for column in join_columns if column in available_columns]
+    if not existing_join_columns:
+        return frame
+    security = pl.read_parquet(security_path, columns=["symbol", *existing_join_columns])
     return frame.join(security, on="symbol", how="left")
 
 

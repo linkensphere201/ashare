@@ -440,11 +440,29 @@ def _map_tushare_raw_to_curated(frame: pl.DataFrame, dataset: str) -> pl.DataFra
                 pl.col("symbol").alias("raw_symbol"),
                 pl.col("ts_code").str.split(".").list.get(1).alias("exchange"),
                 pl.lit("stock").alias("asset_type"),
+                _market_segment_expr().alias("market_segment"),
+                _market_segment_name_expr().alias("market_segment_name"),
                 _parse_yyyymmdd("list_date").alias("list_date"),
                 _parse_yyyymmdd("delist_date").alias("delist_date"),
                 pl.lit("active").alias("status"),
             ]
-        ).select(["symbol", "raw_symbol", "exchange", "asset_type", "name", "market", "list_date", "delist_date", "status"])
+        ).select(
+            [
+                "symbol",
+                "raw_symbol",
+                "exchange",
+                "asset_type",
+                "name",
+                "market",
+                "market_segment",
+                "market_segment_name",
+                "area",
+                "industry",
+                "list_date",
+                "delist_date",
+                "status",
+            ]
+        )
     if dataset == "trading_calendar":
         return frame.with_columns(
             [
@@ -495,6 +513,40 @@ def _parse_yyyymmdd(column: str) -> pl.Expr:
             .otherwise(pl.col(column).cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d", strict=False))
         )
     return pl.col(column).cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d", strict=False)
+
+
+def _market_segment_expr() -> pl.Expr:
+    exchange = pl.col("ts_code").str.split(".").list.get(1)
+    return (
+        pl.when((exchange == "SH") & (pl.col("market") == "主板"))
+        .then(pl.lit("sh_main"))
+        .when((exchange == "SH") & (pl.col("market") == "科创板"))
+        .then(pl.lit("star"))
+        .when((exchange == "SZ") & (pl.col("market") == "主板"))
+        .then(pl.lit("sz_main"))
+        .when((exchange == "SZ") & (pl.col("market") == "创业板"))
+        .then(pl.lit("chinext"))
+        .when((exchange == "BJ") | (pl.col("market") == "北交所"))
+        .then(pl.lit("bj"))
+        .otherwise(pl.lit("unknown"))
+    )
+
+
+def _market_segment_name_expr() -> pl.Expr:
+    exchange = pl.col("ts_code").str.split(".").list.get(1)
+    return (
+        pl.when((exchange == "SH") & (pl.col("market") == "主板"))
+        .then(pl.lit("上证主板"))
+        .when((exchange == "SH") & (pl.col("market") == "科创板"))
+        .then(pl.lit("科创板"))
+        .when((exchange == "SZ") & (pl.col("market") == "主板"))
+        .then(pl.lit("深市主板"))
+        .when((exchange == "SZ") & (pl.col("market") == "创业板"))
+        .then(pl.lit("创业板"))
+        .when((exchange == "BJ") | (pl.col("market") == "北交所"))
+        .then(pl.lit("北交所"))
+        .otherwise(pl.lit("未知"))
+    )
 
 
 def _merge_with_existing_current(

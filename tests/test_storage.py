@@ -433,6 +433,71 @@ def test_promote_tushare_daily_prices_raw(tmp_path: Path) -> None:
     assert frame.select("trade_year").to_series().to_list() == [2026]
 
 
+def test_promote_tushare_security_master_adds_market_fields(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    _write_security_master_schema(tmp_path)
+    assert init_storage(config_path).ok
+    assert register_schemas(config_path).ok
+    raw = pl.DataFrame(
+        {
+            "ts_code": ["600519.SH", "688526.SH", "300750.SZ", "920964.BJ"],
+            "symbol": ["600519", "688526", "300750", "920964"],
+            "name": ["Kweichow Moutai", "Bioleader", "CATL", "Runong"],
+            "area": ["Guizhou", "Shanghai", "Fujian", "Beijing"],
+            "industry": ["Liquor", "Biotech", "Battery", "Agriculture"],
+            "market": ["主板", "科创板", "创业板", "北交所"],
+            "list_date": ["20010827", "20200922", "20180611", "20200727"],
+            "delist_date": ["", "", "", ""],
+        }
+    )
+    write_raw_batch(config_path, "tushare", "security_master", raw, "2026-04-28")
+
+    result = promote_raw_batch(config_path, "tushare", "security_master", "2026-04-28")
+
+    assert result.ok
+    assert result.output_path is not None
+    frame = pl.read_parquet(result.output_path).sort("symbol")
+    rows = frame.select(["symbol", "exchange", "market", "market_segment", "market_segment_name", "area", "industry"]).to_dicts()
+    assert rows == [
+        {
+            "symbol": "300750.SZ",
+            "exchange": "SZ",
+            "market": "创业板",
+            "market_segment": "chinext",
+            "market_segment_name": "创业板",
+            "area": "Fujian",
+            "industry": "Battery",
+        },
+        {
+            "symbol": "600519.SH",
+            "exchange": "SH",
+            "market": "主板",
+            "market_segment": "sh_main",
+            "market_segment_name": "上证主板",
+            "area": "Guizhou",
+            "industry": "Liquor",
+        },
+        {
+            "symbol": "688526.SH",
+            "exchange": "SH",
+            "market": "科创板",
+            "market_segment": "star",
+            "market_segment_name": "科创板",
+            "area": "Shanghai",
+            "industry": "Biotech",
+        },
+        {
+            "symbol": "920964.BJ",
+            "exchange": "BJ",
+            "market": "北交所",
+            "market_segment": "bj",
+            "market_segment_name": "北交所",
+            "area": "Beijing",
+            "industry": "Agriculture",
+        },
+    ]
+
+
 def test_promote_tushare_moneyflow_and_cyq_merge(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     _write_capital_flow_schema(tmp_path)
@@ -731,6 +796,50 @@ def _write_capital_flow_schema(tmp_path: Path) -> None:
             ]
         )
     (schema_dir / "capital_flow_or_chip.yaml").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_security_master_schema(tmp_path: Path) -> None:
+    schema_dir = tmp_path / "schemas" / "curated"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    fields = [
+        ("symbol", "string", False, True, False),
+        ("raw_symbol", "string", True, False, False),
+        ("exchange", "string", True, False, False),
+        ("asset_type", "string", False, False, False),
+        ("name", "string", True, False, False),
+        ("market", "string", True, False, False),
+        ("market_segment", "string", True, False, False),
+        ("market_segment_name", "string", True, False, False),
+        ("area", "string", True, False, False),
+        ("industry", "string", True, False, False),
+        ("list_date", "date", True, False, False),
+        ("delist_date", "date", True, False, False),
+        ("status", "string", False, False, False),
+        ("source", "string", False, False, False),
+        ("source_batch_id", "string", False, False, False),
+        ("data_version", "string", False, False, False),
+        ("created_at", "datetime", False, False, False),
+    ]
+    lines = [
+        "dataset_id: security_master",
+        "dataset_name: Security Master",
+        "layer: curated",
+        "version: v001",
+        "description: Security master schema.",
+        "fields:",
+    ]
+    for name, field_type, nullable, primary_key, partition_key in fields:
+        lines.extend(
+            [
+                f"  - name: {name}",
+                f"    type: {field_type}",
+                f"    nullable: {str(nullable).lower()}",
+                f"    primary_key: {str(primary_key).lower()}",
+                f"    partition_key: {str(partition_key).lower()}",
+                f"    description: {name}.",
+            ]
+        )
+    (schema_dir / "security_master.yaml").write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_storage_config(tmp_path: Path) -> Path:
