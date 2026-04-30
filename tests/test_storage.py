@@ -7,9 +7,11 @@ import polars as pl
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
+from stock_picker.factor_research import research_candidate_001
 import stock_picker.provider as provider_module
 from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily, write_raw_batch
 from stock_picker.quality import check_curated_quality
+from stock_picker.reports import show_report
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
 from stock_picker.strategy import backtest_candidate_001, rank_candidate_001
@@ -801,6 +803,75 @@ def test_rank_candidate_001_outputs_matching_candidate(tmp_path: Path) -> None:
     assert "net_amount_rate>0" in result.message
 
 
+def test_rank_candidate_001_excludes_st_names(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    data_root = tmp_path / "data" / "curated" / "current"
+    security_path = data_root / "security_master" / "part-000.parquet"
+    daily_path = data_root / "daily_prices" / "part-000.parquet"
+    capital_path = data_root / "capital_flow_or_chip" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    daily_path.parent.mkdir(parents=True)
+    capital_path.parent.mkdir(parents=True)
+
+    latest = date(2026, 4, 28)
+    dates = [latest - timedelta(days=39 - index) for index in range(40)]
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ", "000002.SZ"],
+            "name": ["Kweichow Moutai", "*ST Test", "ST Test"],
+            "status": ["active", "active", "active"],
+        }
+    ).write_parquet(security_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"] * 40 + ["000001.SZ"] * 40 + ["000002.SZ"] * 40,
+            "trade_date": dates * 3,
+            "close": ([10.0] * 39 + [20.0]) * 3,
+            "amount": [1000.0] * 120,
+        }
+    ).write_parquet(daily_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ", "000002.SZ"],
+            "trade_date": [latest, latest, latest],
+            "main_net_inflow_rate": [3.2, 99.0, 98.0],
+            "close_profit_ratio": [85.0, 99.0, 99.0],
+        }
+    ).write_parquet(capital_path)
+    manifest = {
+        "curated_versions": {
+            "security_master": {"path": str(security_path)},
+            "daily_prices": {"path": str(daily_path)},
+            "capital_flow_or_chip": {"path": str(capital_path)},
+        }
+    }
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO snapshot_manifests (
+              snapshot_id,
+              as_of_date,
+              created_at,
+              data_frequency,
+              config_version,
+              manifest_json,
+              notes
+            )
+            VALUES ('snapshot_st_filter', '2026-04-28', '2026-04-28T16:00:00+00:00', 'daily', 'test', ?, NULL)
+            """,
+            (json.dumps(manifest),),
+        )
+
+    result = rank_candidate_001(config_path, "snapshot_st_filter", top=10)
+
+    assert result.ok
+    assert "600519.SH" in result.message
+    assert "000001.SZ" not in result.message
+    assert "000002.SZ" not in result.message
+
+
 def test_backtest_candidate_001_outputs_forward_return(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
@@ -813,7 +884,7 @@ def test_backtest_candidate_001_outputs_forward_return(tmp_path: Path) -> None:
     capital_path.parent.mkdir(parents=True)
 
     latest = date(2026, 4, 28)
-    dates = [latest - timedelta(days=44 - index) for index in range(45)]
+    dates = [latest - timedelta(days=45 - index) for index in range(46)]
     signal_date = dates[39]
     pl.DataFrame(
         {
@@ -824,10 +895,10 @@ def test_backtest_candidate_001_outputs_forward_return(tmp_path: Path) -> None:
     ).write_parquet(security_path)
     pl.DataFrame(
         {
-            "symbol": ["600519.SH"] * 45,
+            "symbol": ["600519.SH"] * 46,
             "trade_date": dates,
-            "close": [10.0] * 39 + [20.0] + [22.0] * 5,
-            "amount": [1000.0] * 45,
+            "close": [10.0] * 39 + [20.0] + [22.0] * 5 + [24.2],
+            "amount": [1000.0] * 46,
         }
     ).write_parquet(daily_path)
     pl.DataFrame(
@@ -867,8 +938,127 @@ def test_backtest_candidate_001_outputs_forward_return(tmp_path: Path) -> None:
 
     assert result.ok
     assert "Strategy Candidate 001 v2 backtest" in result.message
+    assert "signal timing: T close signal, T+1 entry" in result.message
     assert "trade_count: 1" in result.message
     assert "avg_forward_return: 0.100000" in result.message
+
+
+def test_factor_research_candidate_001_writes_report_artifacts(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    data_root = tmp_path / "data" / "curated" / "current"
+    security_path = data_root / "security_master" / "part-000.parquet"
+    daily_path = data_root / "daily_prices" / "part-000.parquet"
+    capital_path = data_root / "capital_flow_or_chip" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    daily_path.parent.mkdir(parents=True)
+    capital_path.parent.mkdir(parents=True)
+
+    latest = date(2026, 4, 28)
+    dates = [latest - timedelta(days=45 - index) for index in range(46)]
+    signal_date = dates[39]
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ"],
+            "name": ["Kweichow Moutai", "*ST Test"],
+            "status": ["active", "active"],
+        }
+    ).write_parquet(security_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"] * 46 + ["000001.SZ"] * 46,
+            "trade_date": dates * 2,
+            "close": ([10.0] * 39 + [20.0] + [22.0] * 5 + [24.2]) * 2,
+            "amount": [1000.0] * 92,
+        }
+    ).write_parquet(daily_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ"],
+            "trade_date": [signal_date, signal_date],
+            "main_net_inflow_rate": [3.2, 99.0],
+            "close_profit_ratio": [85.0, 99.0],
+        }
+    ).write_parquet(capital_path)
+    manifest = {
+        "curated_versions": {
+            "security_master": {"path": str(security_path)},
+            "daily_prices": {"path": str(daily_path)},
+            "capital_flow_or_chip": {"path": str(capital_path)},
+        }
+    }
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO snapshot_manifests (
+              snapshot_id,
+              as_of_date,
+              created_at,
+              data_frequency,
+              config_version,
+              manifest_json,
+              notes
+            )
+            VALUES ('snapshot_factor_research', '2026-04-28', '2026-04-28T16:00:00+00:00', 'daily', 'test', ?, NULL)
+            """,
+            (json.dumps(manifest),),
+        )
+
+    result = research_candidate_001(
+        config_path,
+        "snapshot_factor_research",
+        holding_days=5,
+        top=10,
+        report_id="candidate_001_test_report",
+    )
+
+    assert result.ok
+    assert result.report_dir is not None
+    summary_path = result.report_dir / "summary.md"
+    factor_summary_path = result.report_dir / "factor_summary.json"
+    factor_results_path = result.report_dir / "factor_results.csv"
+    ranking_path = result.report_dir / "ranking.csv"
+    backtest_path = result.report_dir / "backtest_trades.csv"
+    metrics_path = result.report_dir / "metrics.json"
+    assert summary_path.exists()
+    assert factor_summary_path.exists()
+    assert factor_results_path.exists()
+    assert ranking_path.exists()
+    assert backtest_path.exists()
+    assert metrics_path.exists()
+    summary = summary_path.read_text(encoding="utf-8")
+    assert "Factor Summary" in summary
+    assert "Explanation" in summary
+    assert "Ranking Result" in summary
+    assert "Backtest Result" in summary
+    assert "ST` or `*ST` are excluded" in summary
+    summary_json = json.loads(factor_summary_path.read_text(encoding="utf-8"))
+    assert "strategy_description" in summary_json
+    assert "factor_value_description" in summary_json
+    assert "ranking_description" in summary_json
+    assert "backtest_description" in summary_json
+    assert summary_json["entry_price_rule"] == "T+1 open if available, otherwise T+1 close"
+    factor_results = pl.read_csv(factor_results_path)
+    assert "factor_pass" in factor_results.columns
+    assert "factor_value" in factor_results.columns
+    ranking = pl.read_csv(ranking_path)
+    assert "symbol" in ranking.columns
+    assert "factor_value" in ranking.columns
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert metrics["trade_count"] == 1
+    shown = show_report(config_path, "candidate_001_test_report", limit=5)
+    assert shown.ok
+    assert "factor_description:" in shown.message
+    assert "factor_results:" not in shown.message
+    assert "ranking_results:" in shown.message
+    assert "backtest_result:" in shown.message
+    assert "排序逻辑" in shown.message
+    assert "factor_rank" in shown.message
+    assert "symbol" in shown.message
+    assert "factor_value" in shown.message
+    assert "factor_pass" not in shown.message
+    assert "+-" in shown.message
 
 
 def test_fetch_cyq_perf_requires_ts_code(tmp_path: Path) -> None:

@@ -9,8 +9,10 @@ import sys
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
+from stock_picker.factor_research import research_candidate_001
 from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily
 from stock_picker.quality import check_curated_quality
+from stock_picker.reports import show_report
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
 from stock_picker.strategy import backtest_candidate_001, rank_candidate_001
@@ -31,6 +33,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     strategy = subparsers.add_parser("strategy", help="Run strategy ranking and diagnostics")
     strategy_subparsers = strategy.add_subparsers(dest="strategy_command", required=True)
+
+    factor = subparsers.add_parser("factor", help="Run factor research reports")
+    factor_subparsers = factor.add_subparsers(dest="factor_command", required=True)
+
+    reports = subparsers.add_parser("reports", help="Display generated reports")
+    reports_subparsers = reports.add_subparsers(dest="reports_command", required=True)
+
+    show_report_cmd = reports_subparsers.add_parser(
+        "show-report",
+        help="Show a generated factor research report as PrettyTables",
+    )
+    show_report_cmd.add_argument("--report-id", required=True, help="Report id")
+    show_report_cmd.add_argument("--limit", type=int, default=10, help="Maximum rows per displayed table")
+    show_report_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    factor_research_candidate_cmd = factor_subparsers.add_parser(
+        "research-candidate-001",
+        help="Generate Strategy Candidate 001 v2 factor research artifacts",
+    )
+    factor_research_candidate_cmd.add_argument("--snapshot-id", required=True, help="Snapshot id")
+    factor_research_candidate_cmd.add_argument("--holding-days", type=int, default=20, help="Holding window in trading rows")
+    factor_research_candidate_cmd.add_argument("--top", type=int, default=10, help="Candidate count")
+    factor_research_candidate_cmd.add_argument("--report-id", help="Optional stable report id")
+    factor_research_candidate_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     rank_candidate_cmd = strategy_subparsers.add_parser(
         "rank-candidate-001",
@@ -490,6 +516,32 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "strategy" and args.strategy_command == "backtest-candidate-001":
         result = backtest_candidate_001(Path(args.config), args.snapshot_id, args.holding_days, args.top)
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "factor" and args.factor_command == "research-candidate-001":
+        result = research_candidate_001(
+            Path(args.config),
+            snapshot_id=args.snapshot_id,
+            holding_days=args.holding_days,
+            top=args.top,
+            report_id=args.report_id,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "reports" and args.reports_command == "show-report":
+        result = show_report(
+            Path(args.config),
+            report_id=args.report_id,
+            limit=args.limit,
+        )
         if result.ok:
             print(result.message)
             return 0

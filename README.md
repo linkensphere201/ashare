@@ -355,6 +355,30 @@ Provider commands read `TUSHARE_TOKEN` from the environment and never print the 
 | `stock-picker strategy rank-candidate-001` | Rank Strategy Candidate 001 v2 candidates from a snapshot |
 | `stock-picker strategy backtest-candidate-001` | Run forward-return diagnostics for Strategy Candidate 001 v2 |
 
+### Factor Research
+
+| Command | Purpose |
+| --- | --- |
+| `stock-picker factor research-candidate-001` | Generate Strategy Candidate 001 v2 factor summary, explanation, ranking CSV, backtest trades CSV, metrics JSON, and Markdown report |
+
+Example:
+
+```powershell
+stock-picker factor research-candidate-001 --config config/storage.yaml --snapshot-id snapshot_20260428_003 --holding-days 20 --top 10 --report-id candidate_001_v2_snapshot_20260428_003
+```
+
+### Reports
+
+| Command | Purpose |
+| --- | --- |
+| `stock-picker reports show-report` | Show a generated factor research report with PrettyTables for factor description, factor results, ranking results, and backtest metrics |
+
+Example:
+
+```powershell
+stock-picker reports show-report --config config/storage.yaml --report-id candidate_001_v2_snapshot_20260428_003 --limit 10
+```
+
 ## Manual CSV Debug Path
 
 Manual CSV templates live under `examples/manual_input/`. They are kept for development, tests, and emergency debugging only.

@@ -34,12 +34,14 @@ def rank_candidate_001(config_path: Path, snapshot_id: str, top: int = 10) -> St
     security = pl.read_parquet(paths["security_master"])
     daily = pl.read_parquet(paths["daily_prices"])
     capital = pl.read_parquet(paths["capital_flow_or_chip"])
+    trading_calendar = pl.read_parquet(paths["trading_calendar"]) if "trading_calendar" in paths else None
     if daily.is_empty() or capital.is_empty() or security.is_empty():
         return StrategyResult(False, "strategy ranking failed; one or more input datasets are empty")
 
     latest_trade_date = daily.select(pl.col("trade_date").max()).item()
     candidates = (
         _candidate_001_frame(daily, capital, security)
+        .join(_trade_date_successors(daily, trading_calendar), on="trade_date", how="left")
         .filter(pl.col("trade_date") == latest_trade_date)
         .sort(_CANDIDATE_SORT_COLUMNS, descending=_CANDIDATE_SORT_DESCENDING)
         .head(top)
@@ -62,7 +64,8 @@ def rank_candidate_001(config_path: Path, snapshot_id: str, top: int = 10) -> St
             "rank",
             "symbol",
             "name",
-            "trade_date",
+            pl.col("trade_date").alias("signal_date"),
+            "recommend_trade_date",
             "close",
             "main_net_inflow_rate",
             "close_profit_ratio",
@@ -103,20 +106,10 @@ def backtest_candidate_001(
         return StrategyResult(False, "strategy backtest failed; holding_days must be positive")
 
     candidates = _candidate_001_frame(daily, capital, security)
-    forward_prices = (
-        daily.sort(["symbol", "trade_date"])
-        .select(["symbol", "trade_date", "close"])
-        .with_columns(
-            [
-                pl.col("close").shift(-holding_days).over("symbol").alias("exit_close"),
-                pl.col("trade_date").shift(-holding_days).over("symbol").alias("exit_trade_date"),
-            ]
-        )
-        .select(["symbol", "trade_date", "exit_trade_date", "exit_close"])
-    )
+    forward_prices = _entry_exit_prices(daily, holding_days)
     backtest_rows = (
         candidates.join(forward_prices, on=["symbol", "trade_date"], how="left")
-        .with_columns(((pl.col("exit_close") / pl.col("close")) - 1).alias("forward_return"))
+        .with_columns(((pl.col("exit_price") / pl.col("entry_price")) - 1).alias("forward_return"))
         .sort(["trade_date", *_CANDIDATE_SORT_COLUMNS], descending=[False, *_CANDIDATE_SORT_DESCENDING])
         .group_by("trade_date", maintain_order=True)
         .head(top)
@@ -140,12 +133,14 @@ def backtest_candidate_001(
     ).row(0, named=True)
     display = backtest_rows.select(
         [
-            "trade_date",
+            pl.col("trade_date").alias("signal_date"),
+            "recommend_trade_date",
             "symbol",
             "name",
-            "close",
+            pl.col("close").alias("signal_close"),
+            "entry_price",
             "exit_trade_date",
-            "exit_close",
+            "exit_price",
             "forward_return",
             "main_net_inflow_rate",
             "close_profit_ratio",
@@ -156,6 +151,8 @@ def backtest_candidate_001(
         "\n".join(
             [
                 "Strategy Candidate 001 v2 backtest:",
+                "signal timing: T close signal, T+1 entry",
+                "entry_price: T+1 open when available, otherwise T+1 close",
                 f"holding_days: {holding_days}",
                 f"top_per_date: {top}",
                 f"signal_dates: {metrics['signal_dates']}",
@@ -180,11 +177,55 @@ def _candidate_001_frame(daily: pl.DataFrame, capital: pl.DataFrame, security: p
         daily_with_factors.join(capital, on=["symbol", "trade_date"], how="inner")
         .join(security.select(["symbol", "name", "status"]), on="symbol", how="left")
         .filter(pl.col("status") == "active")
+        .filter(~pl.col("name").fill_null("").str.contains(r"\*?ST"))
         .filter(pl.col("close").is_not_null())
         .filter(pl.col("amount").fill_null(0) > 0)
         .filter(pl.col("main_net_inflow_rate").fill_null(-999999) > 0)
         .filter(pl.col("macd_golden_cross").fill_null(False))
         .filter(pl.col("close_profit_ratio").fill_null(-999999) > 80)
+    )
+
+
+def _trade_date_successors(daily: pl.DataFrame, trading_calendar: pl.DataFrame | None = None) -> pl.DataFrame:
+    if trading_calendar is not None and not trading_calendar.is_empty() and "trade_date" in trading_calendar.columns:
+        dates = trading_calendar
+        if "is_trading_day" in dates.columns:
+            dates = dates.filter(pl.col("is_trading_day").fill_null(False))
+        return (
+            dates.select("trade_date")
+            .unique()
+            .sort("trade_date")
+            .with_columns(pl.col("trade_date").shift(-1).alias("recommend_trade_date"))
+        )
+    return (
+        daily.select("trade_date")
+        .unique()
+        .sort("trade_date")
+        .with_columns(pl.col("trade_date").shift(-1).alias("recommend_trade_date"))
+    )
+
+
+def _entry_exit_prices(daily: pl.DataFrame, holding_days: int) -> pl.DataFrame:
+    sorted_daily = daily.sort(["symbol", "trade_date"])
+    entry_price_expr = pl.col("close").shift(-1).over("symbol")
+    if "open" in daily.columns:
+        entry_price_expr = pl.coalesce(
+            [
+                pl.col("open").shift(-1).over("symbol"),
+                pl.col("close").shift(-1).over("symbol"),
+            ]
+        )
+    return (
+        sorted_daily.select(["symbol", "trade_date", "close", *([] if "open" not in daily.columns else ["open"])])
+        .with_columns(
+            [
+                pl.col("trade_date").shift(-1).over("symbol").alias("recommend_trade_date"),
+                entry_price_expr.alias("entry_price"),
+                pl.col("trade_date").shift(-(holding_days + 1)).over("symbol").alias("exit_trade_date"),
+                pl.col("close").shift(-(holding_days + 1)).over("symbol").alias("exit_price"),
+            ]
+        )
+        .select(["symbol", "trade_date", "recommend_trade_date", "entry_price", "exit_trade_date", "exit_price"])
     )
 
 
