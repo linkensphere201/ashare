@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
+import sys
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
 from stock_picker.display import inspect_run, list_runs, preview_curated
@@ -12,6 +14,9 @@ from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
 from stock_picker.strategy import backtest_candidate_001, rank_candidate_001
+
+
+LOGGER_NAME = "stock_picker"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -389,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.command == "provider" and args.provider_command == "run-cyq-perf-batches":
+        progress_logger = _configure_progress_logger()
         result = run_cyq_perf_batches(
             config_path=Path(args.config),
             source=args.source,
@@ -401,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
             delay_seconds=args.delay_seconds,
             token_env=args.token_env,
             progress_every_batches=args.progress_every_batches,
-            progress_callback=print,
+            progress_callback=progress_logger.info,
             retry=args.retry,
             retry_wait_seconds=args.retry_wait_seconds,
             backoff_multiplier=args.backoff_multiplier,
@@ -413,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.command == "provider" and args.provider_command == "run-market-daily":
+        progress_logger = _configure_progress_logger()
         result = run_market_daily(
             config_path=Path(args.config),
             source=args.source,
@@ -429,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
             symbol_batch_size=args.symbol_batch_size,
             token_env=args.token_env,
             progress_every_tasks=args.progress_every_tasks,
-            progress_callback=print,
+            progress_callback=progress_logger.info,
         )
         if result.ok:
             print(result.message)
@@ -471,6 +478,18 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error("unsupported command")
     return 2
+
+
+def _configure_progress_logger() -> logging.Logger:
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
+    return logger
 
 
 if __name__ == "__main__":

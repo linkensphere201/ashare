@@ -207,7 +207,7 @@ Start with a small `--max-tasks`. Increase it only after confirming the account'
 
 `daily_prices` tasks are split by trading day. `moneyflow_dc` can hit Tushare's single-request row cap even for one trading day, so it is split by trading day plus active-symbol batches from current `security_master`; tune that with `--symbol-batch-size`.
 
-Long runs print periodic progress by default. Tune the cadence with `--progress-every-tasks`; set it to `0` to disable progress lines.
+Long runs emit periodic progress through Python standard logging on stdout. Tune the cadence with `--progress-every-tasks`; set it to `0` to disable progress lines.
 
 `cyq_perf` should be fetched by `--ts-code` first because the API is stock-code oriented:
 
@@ -229,7 +229,7 @@ For larger pulls, use the resumable run command. It stores symbol-batch tasks in
 stock-picker provider run-cyq-perf-batches --config config/storage.yaml --run-id cyq_20260428 --start-date 2026-04-26 --end-date 2026-04-28 --as-of-date 2026-04-28 --batch-size 100 --max-batches 1 --delay-seconds 0.35 --retry 3 --retry-wait-seconds 60 --backoff-multiplier 2 --progress-every-batches 1
 ```
 
-Run the same command again to continue the next task. Increase `--max-batches` only after confirming provider rate limits are safe. `cyq_perf` has shown a 200 requests/minute provider limit in real runs, so keep `--delay-seconds` below that limit and use retry/backoff for transient rate-limit responses. Retry/backoff is only applied to normalized retryable provider errors such as rate limits; non-retryable provider errors fail the task and stop the run. When a requested symbol returns no `cyq_perf` rows, the raw batch keeps an audit placeholder row with `provider_status=not_found` and `winner_rate=null`; promotion maps it to `capital_flow_or_chip.close_profit_ratio=null` with `data_method=tushare_cyq_perf:not_found`. Tune progress output with `--progress-every-batches`; set it to `0` to disable progress lines.
+Run the same command again to continue the next task. Increase `--max-batches` only after confirming provider rate limits are safe. `cyq_perf` has shown a 200 requests/minute provider limit in real runs, so keep `--delay-seconds` below that limit and use retry/backoff for transient rate-limit responses. Retry/backoff is only applied to normalized retryable provider errors such as rate limits; non-retryable provider errors fail the task and stop the run. When a requested symbol returns no `cyq_perf` rows, the raw batch keeps an audit placeholder row with `provider_status=not_found` and `winner_rate=null`; promotion maps it to `capital_flow_or_chip.close_profit_ratio=null` with `data_method=tushare_cyq_perf:not_found`. Progress is emitted through Python standard logging on stdout; tune it with `--progress-every-batches`, or set it to `0` to disable progress lines.
 
 Promote raw batches into curated current Parquet:
 
