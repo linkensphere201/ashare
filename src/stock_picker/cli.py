@@ -7,7 +7,7 @@ from pathlib import Path
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
 from stock_picker.display import inspect_run, list_runs, preview_curated
-from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api
+from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily
 from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
@@ -73,6 +73,44 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_cyq_batch_cmd.add_argument("--delay-seconds", type=float, default=0.0, help="Sleep between symbol requests")
     fetch_cyq_batch_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
     fetch_cyq_batch_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    run_cyq_cmd = provider_subparsers.add_parser(
+        "run-cyq-perf-batches",
+        help="Run resumable multi-batch Tushare cyq_perf fetching",
+    )
+    run_cyq_cmd.add_argument("--source", default="tushare", help="Provider source, currently tushare")
+    run_cyq_cmd.add_argument("--run-id", help="Optional run id. Defaults to source/dataset/as-of-date run id.")
+    run_cyq_cmd.add_argument("--start-date", help="Start date, such as 2026-01-01")
+    run_cyq_cmd.add_argument("--end-date", help="End date, such as 2026-04-28")
+    run_cyq_cmd.add_argument("--as-of-date", help="Business as-of date for raw batches")
+    run_cyq_cmd.add_argument("--batch-size", type=int, default=100, help="Symbols per raw batch")
+    run_cyq_cmd.add_argument("--max-batches", type=int, default=1, help="Maximum batches to run in this invocation")
+    run_cyq_cmd.add_argument("--delay-seconds", type=float, default=0.0, help="Sleep between symbol requests")
+    run_cyq_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
+    run_cyq_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    run_market_daily_cmd = provider_subparsers.add_parser(
+        "run-market-daily",
+        help="Run resumable date-task Tushare daily market fetching",
+    )
+    run_market_daily_cmd.add_argument("--source", default="tushare", help="Provider source, currently tushare")
+    run_market_daily_cmd.add_argument("--run-id", help="Optional run id. Defaults to source/window run id.")
+    run_market_daily_cmd.add_argument(
+        "--dataset",
+        action="append",
+        help="Dataset to fetch; repeat for multiple datasets. Defaults to daily_prices and moneyflow_dc.",
+    )
+    run_market_daily_cmd.add_argument("--start-date", required=True, help="Start date, such as 2025-04-28")
+    run_market_daily_cmd.add_argument("--end-date", required=True, help="End date, such as 2026-04-28")
+    run_market_daily_cmd.add_argument("--as-of-date", help="Business as-of date for raw batches")
+    run_market_daily_cmd.add_argument("--max-tasks", type=int, default=1, help="Maximum date tasks to run in this invocation")
+    run_market_daily_cmd.add_argument("--requests-per-minute", type=float, default=40.0, help="Provider request rate limit")
+    run_market_daily_cmd.add_argument("--retry", type=int, default=3, help="Retries per task after the first attempt")
+    run_market_daily_cmd.add_argument("--retry-wait-seconds", type=float, default=60.0, help="Initial retry wait")
+    run_market_daily_cmd.add_argument("--backoff-multiplier", type=float, default=2.0, help="Retry wait multiplier")
+    run_market_daily_cmd.add_argument("--symbol-batch-size", type=int, default=1000, help="Symbols per moneyflow_dc task")
+    run_market_daily_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
+    run_market_daily_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     probe_cmd = provider_subparsers.add_parser("probe", help="Probe provider API access and expected fields")
     probe_cmd.add_argument("--source", required=True, help="Provider source, such as tushare")
@@ -327,6 +365,48 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             offset=args.offset,
             delay_seconds=args.delay_seconds,
+            token_env=args.token_env,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "provider" and args.provider_command == "run-cyq-perf-batches":
+        result = run_cyq_perf_batches(
+            config_path=Path(args.config),
+            source=args.source,
+            run_id=args.run_id,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            as_of_date=args.as_of_date,
+            batch_size=args.batch_size,
+            max_batches=args.max_batches,
+            delay_seconds=args.delay_seconds,
+            token_env=args.token_env,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "provider" and args.provider_command == "run-market-daily":
+        result = run_market_daily(
+            config_path=Path(args.config),
+            source=args.source,
+            run_id=args.run_id,
+            datasets=args.dataset,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            as_of_date=args.as_of_date,
+            max_tasks=args.max_tasks,
+            requests_per_minute=args.requests_per_minute,
+            retry=args.retry,
+            retry_wait_seconds=args.retry_wait_seconds,
+            backoff_multiplier=args.backoff_multiplier,
+            symbol_batch_size=args.symbol_batch_size,
             token_env=args.token_env,
         )
         if result.ok:

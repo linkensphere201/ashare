@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,12 +27,16 @@ def check_curated_quality(config_path: Path, dataset_ids: list[str] | None = Non
         return QualityResult(False, "quality check failed: no curated datasets found")
 
     issues: list[str] = []
+    warnings: list[str] = []
     checked: list[str] = []
     for check in checks:
         dataset_id = str(check["dataset_id"])
         dataset_issues = _check_one_dataset(check)
         if dataset_issues:
             issues.extend(f"{dataset_id}: {issue}" for issue in dataset_issues)
+        dataset_warnings = _warnings_for_dataset(check)
+        if dataset_warnings:
+            warnings.extend(f"{dataset_id}: {warning}" for warning in dataset_warnings)
         checked.append(dataset_id)
 
     if issues:
@@ -39,7 +44,10 @@ def check_curated_quality(config_path: Path, dataset_ids: list[str] | None = Non
             False,
             "quality check failed:\n" + "\n".join(f"- {issue}" for issue in issues),
         )
-    return QualityResult(True, f"quality check succeeded: {len(checked)} datasets checked")
+    message = f"quality check succeeded: {len(checked)} datasets checked"
+    if warnings:
+        message += "\nquality warnings:\n" + "\n".join(f"- {warning}" for warning in warnings)
+    return QualityResult(True, message)
 
 
 def _load_quality_targets(
@@ -58,7 +66,8 @@ def _load_quality_targets(
                   sv.schema_version_id,
                   cv.path,
                   cv.row_count,
-                  cv.checksum
+                  cv.checksum,
+                  cv.notes
                 FROM requested_datasets rd
                 LEFT JOIN datasets d ON d.dataset_id = rd.dataset_id
                 LEFT JOIN schema_versions sv ON sv.dataset_id = rd.dataset_id AND sv.status = 'active'
@@ -77,7 +86,8 @@ def _load_quality_targets(
                   sv.schema_version_id,
                   cv.path,
                   cv.row_count,
-                  cv.checksum
+                  cv.checksum,
+                  cv.notes
                 FROM datasets d
                 LEFT JOIN schema_versions sv ON sv.dataset_id = d.dataset_id AND sv.status = 'active'
                 LEFT JOIN curated_versions cv
@@ -90,7 +100,7 @@ def _load_quality_targets(
             ).fetchall()
 
         targets: list[dict[str, object]] = []
-        for dataset_id, schema_version_id, path, row_count, checksum in rows:
+        for dataset_id, schema_version_id, path, row_count, checksum, notes in rows:
             fields = []
             if schema_version_id:
                 fields = connection.execute(
@@ -109,6 +119,7 @@ def _load_quality_targets(
                     "path": path,
                     "row_count": row_count,
                     "checksum": checksum,
+                    "notes": notes,
                     "fields": fields,
                 }
             )
@@ -192,3 +203,28 @@ def _check_one_dataset(check: dict[str, object]) -> list[str]:
             )
 
     return issues
+
+
+def _warnings_for_dataset(check: dict[str, object]) -> list[str]:
+    notes = check.get("notes")
+    if not notes:
+        return []
+    try:
+        parsed = json.loads(str(notes))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    overlap = parsed.get("last_promote_overlap")
+    if not isinstance(overlap, dict):
+        return []
+
+    warnings: list[str] = []
+    overlap_keys = int(overlap.get("overlap_keys") or 0)
+    incoming_duplicate_keys = int(overlap.get("incoming_duplicate_keys") or 0)
+    last_batch = str(parsed.get("last_promoted_batch_id") or "unknown")
+    if overlap_keys:
+        warnings.append(f"last promoted batch {last_batch} overlapped {overlap_keys} existing primary keys")
+    if incoming_duplicate_keys:
+        warnings.append(f"last promoted batch {last_batch} contained {incoming_duplicate_keys} duplicate primary keys")
+    return warnings

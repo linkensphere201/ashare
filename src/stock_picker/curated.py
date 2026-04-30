@@ -187,18 +187,27 @@ def promote_raw_batch(
     data_version = str(batch["business_date"] or now[:10])
     mapped = _enrich_frame(mapped, schema, source, str(batch["batch_id"]), data_version, now)
     mapped = _fill_missing_nullable_columns(mapped, schema)
+    primary_keys = _primary_key_columns(schema)
+    overlap_summary = _current_overlap_summary(config, curated_dataset, mapped, primary_keys)
     mapped = _merge_with_existing_current(config, curated_dataset, mapped, schema)
     validation_error = _validate_required_columns(mapped, schema)
     if validation_error:
         return CuratedImportResult(False, validation_error)
+    existing_source_batch_ids = _load_current_source_batch_ids(config.metadata_sqlite_path, curated_dataset)
+    source_batch_ids = _merge_source_batch_ids(existing_source_batch_ids, [str(batch["batch_id"])])
     return _write_curated_current(
         config=config,
         dataset_id=curated_dataset,
         frame=mapped,
         schema=schema,
         as_of_date=data_version,
-        source_batch_ids=[str(batch["batch_id"])],
+        source_batch_ids=source_batch_ids,
         created_at=now,
+        notes=_curated_notes(
+            source_batch_id=str(batch["batch_id"]),
+            raw_dataset=str(batch["dataset_name"]),
+            overlap_summary=overlap_summary,
+        ),
     )
 
 
@@ -217,6 +226,7 @@ def inspect_curated(config_path: Path, dataset_id: str) -> CuratedInspectionResu
               cv.row_count,
               cv.checksum,
               cv.status,
+              cv.notes,
               sv.schema_file_path,
               sv.schema_hash
             FROM curated_versions cv
@@ -255,6 +265,7 @@ def inspect_curated(config_path: Path, dataset_id: str) -> CuratedInspectionResu
         metadata_row_count,
         checksum,
         status,
+        notes,
         schema_file_path,
         schema_hash,
     ) = row
@@ -280,6 +291,7 @@ def inspect_curated(config_path: Path, dataset_id: str) -> CuratedInspectionResu
             f"metadata_row_count: {metadata_row_count}",
             f"actual_row_count: {actual_row_count}",
             f"checksum: {checksum}",
+            f"notes: {notes}",
             f"registered_fields: {len(field_names)}",
             f"parquet_columns: {sample_columns}",
         ]
@@ -295,6 +307,7 @@ def _write_curated_current(
     as_of_date: str | None,
     source_batch_ids: list[str],
     created_at: str,
+    notes: str | None = None,
 ) -> CuratedImportResult:
     output_dir = config.current_curated_root / dataset_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -319,9 +332,10 @@ def _write_curated_current(
               source_batch_ids,
               row_count,
               checksum,
-              status
+              status,
+              notes
             )
-            VALUES (?, ?, ?, 'current', NULL, ?, ?, ?, ?, ?, ?, 'active')
+            VALUES (?, ?, ?, 'current', NULL, ?, ?, ?, ?, ?, ?, 'active', ?)
             ON CONFLICT(curated_version_id) DO UPDATE SET
               schema_version_id = excluded.schema_version_id,
               path = excluded.path,
@@ -330,7 +344,8 @@ def _write_curated_current(
               source_batch_ids = excluded.source_batch_ids,
               row_count = excluded.row_count,
               checksum = excluded.checksum,
-              status = excluded.status
+              status = excluded.status,
+              notes = excluded.notes
             """,
             (
                 curated_version_id,
@@ -342,6 +357,7 @@ def _write_curated_current(
                 json.dumps(source_batch_ids),
                 row_count,
                 checksum,
+                notes,
             ),
         )
 
@@ -560,7 +576,7 @@ def _merge_with_existing_current(
         return frame
     existing = pl.read_parquet(output_path)
     combined = pl.concat([existing, frame], how="diagonal_relaxed")
-    primary_keys = [str(field["name"]) for field in schema if bool(field["primary_key"])]
+    primary_keys = _primary_key_columns(schema)
     if not primary_keys:
         return combined
     aggregations = [
@@ -569,6 +585,95 @@ def _merge_with_existing_current(
         if column not in primary_keys
     ]
     return combined.group_by(primary_keys, maintain_order=True).agg(aggregations)
+
+
+def _current_overlap_summary(
+    config: StorageConfig,
+    dataset_id: str,
+    frame: pl.DataFrame,
+    primary_keys: list[str],
+) -> dict[str, object]:
+    if not primary_keys:
+        return {"primary_keys": [], "incoming_rows": frame.height, "incoming_duplicate_keys": 0, "overlap_keys": 0}
+    incoming_duplicate_keys = _duplicate_key_count(frame, primary_keys)
+    output_path = config.current_curated_root / dataset_id / "part-000.parquet"
+    if not output_path.exists():
+        return {
+            "primary_keys": primary_keys,
+            "incoming_rows": frame.height,
+            "incoming_duplicate_keys": incoming_duplicate_keys,
+            "overlap_keys": 0,
+        }
+    existing = pl.read_parquet(output_path)
+    overlap_keys = (
+        frame.select(primary_keys)
+        .unique()
+        .join(existing.select(primary_keys).unique(), on=primary_keys, how="inner")
+        .height
+    )
+    return {
+        "primary_keys": primary_keys,
+        "incoming_rows": frame.height,
+        "incoming_duplicate_keys": incoming_duplicate_keys,
+        "overlap_keys": overlap_keys,
+    }
+
+
+def _duplicate_key_count(frame: pl.DataFrame, primary_keys: list[str]) -> int:
+    if not primary_keys:
+        return 0
+    return frame.group_by(primary_keys).len().filter(pl.col("len") > 1).height
+
+
+def _primary_key_columns(schema: list[dict[str, object]]) -> list[str]:
+    return [str(field["name"]) for field in schema if bool(field["primary_key"])]
+
+
+def _load_current_source_batch_ids(sqlite_path: Path, dataset_id: str) -> list[str]:
+    with sqlite3.connect(sqlite_path) as connection:
+        row = connection.execute(
+            """
+            SELECT source_batch_ids
+            FROM curated_versions
+            WHERE dataset_id = ? AND version_type = 'current' AND status = 'active'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (dataset_id,),
+        ).fetchone()
+    if row is None or not row[0]:
+        return []
+    try:
+        values = json.loads(str(row[0]))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(values, list):
+        return []
+    return [str(value) for value in values]
+
+
+def _merge_source_batch_ids(existing: list[str], incoming: list[str]) -> list[str]:
+    merged: list[str] = []
+    for batch_id in existing + incoming:
+        if batch_id not in merged:
+            merged.append(batch_id)
+    return merged
+
+
+def _curated_notes(
+    source_batch_id: str,
+    raw_dataset: str,
+    overlap_summary: dict[str, object],
+) -> str:
+    return json.dumps(
+        {
+            "last_promoted_batch_id": source_batch_id,
+            "last_promoted_raw_dataset": raw_dataset,
+            "last_promote_overlap": overlap_summary,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def _enrich_frame(

@@ -7,7 +7,8 @@ import polars as pl
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
 from stock_picker.display import inspect_run, list_runs, preview_curated
-from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, write_raw_batch
+import stock_picker.provider as provider_module
+from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily, write_raw_batch
 from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
@@ -34,6 +35,8 @@ def test_storage_init_and_validate(tmp_path: Path) -> None:
 
     assert {
         "data_batches",
+        "provider_runs",
+        "provider_run_tasks",
         "datasets",
         "schema_versions",
         "schema_fields",
@@ -433,6 +436,92 @@ def test_promote_tushare_daily_prices_raw(tmp_path: Path) -> None:
     assert frame.select("trade_year").to_series().to_list() == [2026]
 
 
+def test_promote_raw_records_overlap_notes_and_quality_warning(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    _write_daily_prices_schema(
+        tmp_path,
+        extra_fields=[
+            ("asset_type", "string", False),
+            ("open", "double", True),
+            ("high", "double", True),
+            ("low", "double", True),
+            ("close", "double", True),
+            ("pre_close", "double", True),
+            ("volume", "double", True),
+            ("amount", "double", True),
+            ("pct_change", "double", True),
+            ("source", "string", False),
+            ("source_batch_id", "string", False),
+            ("data_version", "string", False),
+            ("created_at", "datetime", False),
+            ("trade_year", "integer", False),
+            ("trade_month", "integer", False),
+        ],
+    )
+    assert init_storage(config_path).ok
+    assert register_schemas(config_path).ok
+    first = pl.DataFrame(
+        {
+            "ts_code": ["600519.SH"],
+            "trade_date": ["20260428"],
+            "open": [1680.0],
+            "high": [1698.0],
+            "low": [1672.0],
+            "close": [1690.0],
+            "pre_close": [1678.0],
+            "vol": [2100000.0],
+            "amount": [3549000.0],
+            "pct_chg": [0.72],
+        }
+    )
+    second = first.with_columns(pl.lit(1700.0).alias("close"))
+    write_raw_batch(config_path, "tushare", "daily_prices", first, "2026-04-28")
+    write_raw_batch(config_path, "tushare", "daily_prices", second, "2026-04-28")
+
+    first_promote = promote_raw_batch(
+        config_path,
+        "tushare",
+        "daily_prices",
+        batch_id="tushare_daily_prices_20260428_001",
+    )
+    second_promote = promote_raw_batch(
+        config_path,
+        "tushare",
+        "daily_prices",
+        batch_id="tushare_daily_prices_20260428_002",
+    )
+
+    assert first_promote.ok
+    assert second_promote.ok
+    assert second_promote.output_path is not None
+    frame = pl.read_parquet(second_promote.output_path)
+    assert frame.height == 1
+    assert frame.select("close").to_series().to_list() == [1700.0]
+
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        source_batch_ids, notes = connection.execute(
+            """
+            SELECT source_batch_ids, notes
+            FROM curated_versions
+            WHERE dataset_id = 'daily_prices' AND version_type = 'current'
+            """
+        ).fetchone()
+
+    assert json.loads(source_batch_ids) == [
+        "tushare_daily_prices_20260428_001",
+        "tushare_daily_prices_20260428_002",
+    ]
+    parsed_notes = json.loads(notes)
+    assert parsed_notes["last_promoted_batch_id"] == "tushare_daily_prices_20260428_002"
+    assert parsed_notes["last_promote_overlap"]["overlap_keys"] == 1
+
+    quality = check_curated_quality(config_path, ["daily_prices"])
+    assert quality.ok
+    assert "quality warnings:" in quality.message
+    assert "overlapped 1 existing primary keys" in quality.message
+
+
 def test_promote_tushare_security_master_adds_market_fields(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     _write_security_master_schema(tmp_path)
@@ -752,6 +841,289 @@ def test_fetch_cyq_perf_batch_writes_combined_raw_batch(tmp_path: Path, monkeypa
     assert "symbols_with_rows=2" in result.message
 
 
+def test_run_cyq_perf_batches_resumes_from_saved_offset(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    security_path = tmp_path / "data" / "curated" / "current" / "security_master" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ", "000004.SZ", "000006.SZ"],
+            "status": ["active", "active", "active", "active"],
+        }
+    ).write_parquet(security_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, ts_code, start_date=None, end_date=None):
+            return pl.DataFrame(
+                {
+                    "ts_code": [ts_code],
+                    "trade_date": [end_date],
+                    "winner_rate": [80.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    first = run_cyq_perf_batches(
+        config_path=config_path,
+        run_id="cyq_test_run",
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        batch_size=2,
+        max_batches=1,
+    )
+    second = run_cyq_perf_batches(
+        config_path=config_path,
+        run_id="cyq_test_run",
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        batch_size=2,
+        max_batches=1,
+    )
+
+    assert first.ok
+    assert "next_offset=2/4" in first.message
+    assert second.ok
+    assert "status=completed" in second.message
+    assert "next_offset=4/4" in second.message
+
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        run = connection.execute(
+            """
+            SELECT status, next_offset, requested_symbols, symbols_with_rows, row_count, raw_batch_ids
+            FROM provider_runs
+            WHERE run_id = 'cyq_test_run'
+            """
+        ).fetchone()
+        batch_rows = connection.execute(
+            "SELECT batch_id, row_count FROM data_batches WHERE dataset_name = 'cyq_perf' ORDER BY batch_id"
+        ).fetchall()
+
+    assert run[0:5] == ("completed", 4, 4, 4, 4)
+    assert json.loads(run[5]) == ["tushare_cyq_perf_20260428_001", "tushare_cyq_perf_20260428_002"]
+    assert batch_rows == [("tushare_cyq_perf_20260428_001", 2), ("tushare_cyq_perf_20260428_002", 2)]
+
+
+def test_run_market_daily_resumes_by_trade_date_tasks(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_trading_calendar_current(tmp_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def daily(self, ts_code=None, trade_date=None, start_date=None, end_date=None):
+            return pl.DataFrame(
+                {
+                    "ts_code": ["600519.SH"],
+                    "trade_date": [trade_date],
+                    "open": [10.0],
+                    "high": [11.0],
+                    "low": [9.0],
+                    "close": [10.5],
+                    "pre_close": [10.0],
+                    "vol": [100.0],
+                    "amount": [1000.0],
+                    "pct_chg": [5.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    first = run_market_daily(
+        config_path=config_path,
+        run_id="market_daily_test",
+        datasets=["daily_prices"],
+        start_date="2026-04-27",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        max_tasks=1,
+        requests_per_minute=0,
+    )
+    second = run_market_daily(
+        config_path=config_path,
+        run_id="market_daily_test",
+        datasets=["daily_prices"],
+        start_date="2026-04-27",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        max_tasks=1,
+        requests_per_minute=0,
+    )
+
+    assert first.ok
+    assert "tasks_success=1/2" in first.message
+    assert second.ok
+    assert "status=completed" in second.message
+    assert "tasks_success=2/2" in second.message
+
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        tasks = connection.execute(
+            """
+            SELECT dataset_name, trade_date, status, attempts, row_count, raw_batch_id
+            FROM provider_run_tasks
+            WHERE run_id = 'market_daily_test'
+            ORDER BY trade_date
+            """
+        ).fetchall()
+        run = connection.execute(
+            "SELECT status, requested_symbols, row_count, raw_batch_ids FROM provider_runs WHERE run_id = 'market_daily_test'"
+        ).fetchone()
+
+    assert [task[:5] for task in tasks] == [
+        ("daily_prices", "2026-04-27", "success", 1, 1),
+        ("daily_prices", "2026-04-28", "success", 1, 1),
+    ]
+    assert [task[5] for task in tasks] == ["tushare_daily_prices_20260428_001", "tushare_daily_prices_20260428_002"]
+    assert run[:3] == ("completed", 2, 2)
+    assert json.loads(run[3]) == ["tushare_daily_prices_20260428_001", "tushare_daily_prices_20260428_002"]
+
+
+def test_run_market_daily_retries_rate_limit_error(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_trading_calendar_current(tmp_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    monkeypatch.setattr(provider_module.time, "sleep", lambda seconds: None)
+    calls = {"daily": 0}
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def daily(self, ts_code=None, trade_date=None, start_date=None, end_date=None):
+            calls["daily"] += 1
+            if calls["daily"] == 1:
+                raise Exception("每分钟最多访问该接口80次")
+            return pl.DataFrame(
+                {
+                    "ts_code": ["600519.SH"],
+                    "trade_date": [trade_date],
+                    "open": [10.0],
+                    "high": [11.0],
+                    "low": [9.0],
+                    "close": [10.5],
+                    "pre_close": [10.0],
+                    "vol": [100.0],
+                    "amount": [1000.0],
+                    "pct_chg": [5.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = run_market_daily(
+        config_path=config_path,
+        run_id="market_daily_retry_test",
+        datasets=["daily_prices"],
+        start_date="2026-04-27",
+        end_date="2026-04-27",
+        as_of_date="2026-04-28",
+        max_tasks=1,
+        requests_per_minute=0,
+        retry=1,
+        retry_wait_seconds=0,
+    )
+
+    assert result.ok
+    assert calls["daily"] == 2
+    assert "tasks_success=1/1" in result.message
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        task = connection.execute(
+            "SELECT status, attempts, error_message FROM provider_run_tasks WHERE run_id = 'market_daily_retry_test'"
+        ).fetchone()
+    assert task == ("success", 2, None)
+
+
+def test_run_market_daily_splits_moneyflow_by_symbol_batches(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_trading_calendar_current(tmp_path)
+    _write_security_master_current(tmp_path, ["000001.SZ", "000002.SZ", "600519.SH"])
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    requested_codes: list[str] = []
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def moneyflow_dc(self, ts_code=None, trade_date=None, start_date=None, end_date=None):
+            requested_codes.append(ts_code)
+            codes = ts_code.split(",")
+            return pl.DataFrame(
+                {
+                    "ts_code": codes,
+                    "trade_date": [trade_date] * len(codes),
+                    "net_amount": [100.0] * len(codes),
+                    "net_amount_rate": [1.0] * len(codes),
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = run_market_daily(
+        config_path=config_path,
+        run_id="market_daily_moneyflow_split_test",
+        datasets=["moneyflow_dc"],
+        start_date="2026-04-27",
+        end_date="2026-04-27",
+        as_of_date="2026-04-28",
+        max_tasks=2,
+        requests_per_minute=0,
+        symbol_batch_size=2,
+    )
+
+    assert result.ok
+    assert "tasks_success=2/2" in result.message
+    assert requested_codes == ["000001.SZ,000002.SZ", "600519.SH"]
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        tasks = connection.execute(
+            """
+            SELECT dataset_name, trade_date, symbol_start_offset, symbol_end_offset, status, row_count
+            FROM provider_run_tasks
+            WHERE run_id = 'market_daily_moneyflow_split_test'
+            ORDER BY symbol_start_offset
+            """
+        ).fetchall()
+    assert tasks == [
+        ("moneyflow_dc", "2026-04-27", 0, 2, "success", 2),
+        ("moneyflow_dc", "2026-04-27", 2, 3, "success", 1),
+    ]
+
+
 def test_probe_provider_requires_tushare_token(monkeypatch) -> None:
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
 
@@ -902,6 +1274,29 @@ def _write_security_master_schema(tmp_path: Path) -> None:
             ]
         )
     (schema_dir / "security_master.yaml").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_trading_calendar_current(tmp_path: Path) -> None:
+    calendar_path = tmp_path / "data" / "curated" / "current" / "trading_calendar" / "part-000.parquet"
+    calendar_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "calendar_id": ["cn_a_share", "cn_a_share"],
+            "trade_date": [date(2026, 4, 27), date(2026, 4, 28)],
+            "is_trading_day": [True, True],
+        }
+    ).write_parquet(calendar_path)
+
+
+def _write_security_master_current(tmp_path: Path, symbols: list[str]) -> None:
+    security_path = tmp_path / "data" / "curated" / "current" / "security_master" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": symbols,
+            "status": ["active"] * len(symbols),
+        }
+    ).write_parquet(security_path)
 
 
 def _write_storage_config(tmp_path: Path) -> Path:

@@ -122,7 +122,7 @@ Tushare API -> raw CSV batches -> curated Parquet -> quality check -> snapshot -
 ```mermaid
 flowchart TD
     Tushare[Tushare API] --> Probe[provider probe]
-    Tushare --> Fetch[provider fetch / fetch-cyq-perf-batch]
+    Tushare --> Fetch[provider fetch / fetch-cyq-perf-batch / run-market-daily]
 
     Fetch --> RawStore[(Raw Store<br/>data/raw/source=...)]
     RawStore --> Batches[(metadata.sqlite<br/>data_batches)]
@@ -165,7 +165,9 @@ flowchart TD
 The data store is layered:
 
 - Raw provider responses are stored as CSV batches under `data/raw/` and registered in `data_batches`.
+- Large provider pulls can be tracked as resumable tasks in `provider_runs` and `provider_run_tasks`.
 - Standardized current datasets are stored as Parquet under `data/curated/current/` and registered in `curated_versions`.
+- Raw batches may overlap. Curated promotion is idempotent by each dataset's primary key; current Parquet keeps one row per key, while `curated_versions.source_batch_ids` and `curated_versions.notes` record promoted batch lineage and last-promotion overlap counts.
 - Snapshots are logical manifests in `snapshot_manifests`; they point to exact curated versions for reproducible strategy and backtest runs.
 - CLI display commands are read-only views over metadata plus curated Parquet.
 
@@ -195,6 +197,16 @@ stock-picker provider fetch --config config/storage.yaml --source tushare --data
 stock-picker provider fetch --config config/storage.yaml --source tushare --dataset moneyflow_dc --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
 ```
 
+For full-market historical pulls, avoid one large `start_date` / `end_date` request for `daily_prices` or `moneyflow_dc`; Tushare can cap returned rows. Use the resumable date-task runner instead. It reads current `trading_calendar`, creates one task per trading day and dataset, writes each successful task as a raw batch, and resumes from unfinished tasks when run again with the same `--run-id`:
+
+```powershell
+stock-picker provider run-market-daily --config config/storage.yaml --run-id market_daily_1y_20260428 --dataset daily_prices --dataset moneyflow_dc --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28 --max-tasks 5 --requests-per-minute 40 --retry 3 --retry-wait-seconds 60 --symbol-batch-size 1000
+```
+
+Start with a small `--max-tasks`. Increase it only after confirming the account's Tushare rate limits are safe. The command stores task state in `metadata.sqlite.provider_run_tasks`; raw batches are promoted later with `storage promote-raw`.
+
+`daily_prices` tasks are split by trading day. `moneyflow_dc` can hit Tushare's single-request row cap even for one trading day, so it is split by trading day plus active-symbol batches from current `security_master`; tune that with `--symbol-batch-size`.
+
 `cyq_perf` should be fetched by `--ts-code` first because the API is stock-code oriented:
 
 ```powershell
@@ -208,6 +220,14 @@ stock-picker provider fetch-cyq-perf-batch --config config/storage.yaml --start-
 ```
 
 Use a small `--limit` first. The command loops through symbols, calls Tushare `cyq_perf`, combines successful rows into one raw `cyq_perf` batch, and records it in `data_batches`.
+
+For larger pulls, use the resumable run command. It stores progress in `metadata.sqlite.provider_runs` and continues from `next_offset` when run again with the same `--run-id`:
+
+```powershell
+stock-picker provider run-cyq-perf-batches --config config/storage.yaml --run-id cyq_20260428 --start-date 2026-04-26 --end-date 2026-04-28 --as-of-date 2026-04-28 --batch-size 100 --max-batches 1 --delay-seconds 0.2
+```
+
+Run the same command again to continue the next batch. Increase `--max-batches` only after confirming provider rate limits are safe.
 
 Promote raw batches into curated current Parquet:
 
@@ -226,6 +246,8 @@ stock-picker storage check-quality --config config/storage.yaml
 stock-picker storage create-snapshot --config config/storage.yaml --as-of-date 2026-04-28
 stock-picker storage inspect-snapshot --config config/storage.yaml --snapshot-id snapshot_20260428_001
 ```
+
+Quality checks fail on actual primary-key duplicates in curated Parquet. If the latest promotion overlapped existing primary keys but was merged cleanly, quality still succeeds and prints an overlap warning for audit.
 
 Preview curated standard-layer rows as a PrettyTable:
 
@@ -305,6 +327,8 @@ stock-picker storage check-quality --config config/storage.yaml --dataset daily_
 | `stock-picker provider probe` | Run a small Tushare API request and check expected fields |
 | `stock-picker provider fetch` | Fetch a Tushare dataset into raw CSV storage and record metadata |
 | `stock-picker provider fetch-cyq-perf-batch` | Fetch Tushare `cyq_perf` for multiple symbols into one raw batch |
+| `stock-picker provider run-cyq-perf-batches` | Resume a multi-batch `cyq_perf` provider run from stored `next_offset` |
+| `stock-picker provider run-market-daily` | Resume full-market `daily_prices` / `moneyflow_dc` pulls by trading-date tasks |
 
 Supported probe APIs:
 

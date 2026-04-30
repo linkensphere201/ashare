@@ -57,6 +57,25 @@ def register_schemas(config_path: Path) -> StorageResult:
 def initialize_metadata_catalog(sqlite_path: Path) -> None:
     with sqlite3.connect(sqlite_path) as connection:
         connection.executescript(METADATA_SCHEMA_SQL)
+        _ensure_metadata_migrations(connection)
+
+
+def _ensure_metadata_migrations(connection: sqlite3.Connection) -> None:
+    curated_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(curated_versions)").fetchall()
+    }
+    if "notes" not in curated_columns:
+        connection.execute("ALTER TABLE curated_versions ADD COLUMN notes TEXT")
+
+    task_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(provider_run_tasks)").fetchall()
+    }
+    if "symbol_start_offset" not in task_columns:
+        connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN symbol_start_offset INTEGER")
+    if "symbol_end_offset" not in task_columns:
+        connection.execute("ALTER TABLE provider_run_tasks ADD COLUMN symbol_end_offset INTEGER")
 
 
 def _load_schema_file(schema_path: Path) -> dict[str, object]:
@@ -239,6 +258,49 @@ CREATE TABLE IF NOT EXISTS data_batches (
   content_checksum TEXT,
   status TEXT NOT NULL,
   notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS provider_runs (
+  run_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  dataset_name TEXT NOT NULL,
+  start_date TEXT,
+  end_date TEXT,
+  as_of_date TEXT,
+  status TEXT NOT NULL,
+  total_symbols INTEGER NOT NULL,
+  next_offset INTEGER NOT NULL,
+  batch_size INTEGER NOT NULL,
+  requested_symbols INTEGER NOT NULL,
+  symbols_with_rows INTEGER NOT NULL,
+  failed_symbols INTEGER NOT NULL,
+  row_count INTEGER NOT NULL,
+  raw_batch_ids TEXT NOT NULL,
+  failure_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS provider_run_tasks (
+  task_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  dataset_name TEXT NOT NULL,
+  trade_date TEXT,
+  symbol_start_offset INTEGER,
+  symbol_end_offset INTEGER,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL,
+  raw_batch_id TEXT,
+  row_count INTEGER NOT NULL,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  notes TEXT,
+  FOREIGN KEY (run_id) REFERENCES provider_runs(run_id)
 );
 
 CREATE TABLE IF NOT EXISTS datasets (
