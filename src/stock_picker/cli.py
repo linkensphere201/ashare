@@ -86,6 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_cyq_cmd.add_argument("--batch-size", type=int, default=100, help="Symbols per raw batch")
     run_cyq_cmd.add_argument("--max-batches", type=int, default=1, help="Maximum batches to run in this invocation")
     run_cyq_cmd.add_argument("--delay-seconds", type=float, default=0.0, help="Sleep between symbol requests")
+    run_cyq_cmd.add_argument("--retry", type=int, default=3, help="Retries per symbol after the first attempt")
+    run_cyq_cmd.add_argument("--retry-wait-seconds", type=float, default=60.0, help="Initial retry wait for symbol fetch failures")
+    run_cyq_cmd.add_argument("--backoff-multiplier", type=float, default=2.0, help="Retry wait multiplier")
+    run_cyq_cmd.add_argument(
+        "--progress-every-batches",
+        type=int,
+        default=1,
+        help="Print progress after every N completed batches; use 0 to disable",
+    )
     run_cyq_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
     run_cyq_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
@@ -109,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_market_daily_cmd.add_argument("--retry-wait-seconds", type=float, default=60.0, help="Initial retry wait")
     run_market_daily_cmd.add_argument("--backoff-multiplier", type=float, default=2.0, help="Retry wait multiplier")
     run_market_daily_cmd.add_argument("--symbol-batch-size", type=int, default=1000, help="Symbols per moneyflow_dc task")
+    run_market_daily_cmd.add_argument(
+        "--progress-every-tasks",
+        type=int,
+        default=50,
+        help="Print progress after every N completed tasks; use 0 to disable",
+    )
     run_market_daily_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
     run_market_daily_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
@@ -385,6 +400,11 @@ def main(argv: list[str] | None = None) -> int:
             max_batches=args.max_batches,
             delay_seconds=args.delay_seconds,
             token_env=args.token_env,
+            progress_every_batches=args.progress_every_batches,
+            progress_callback=print,
+            retry=args.retry,
+            retry_wait_seconds=args.retry_wait_seconds,
+            backoff_multiplier=args.backoff_multiplier,
         )
         if result.ok:
             print(result.message)
@@ -408,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
             backoff_multiplier=args.backoff_multiplier,
             symbol_batch_size=args.symbol_batch_size,
             token_env=args.token_env,
+            progress_every_tasks=args.progress_every_tasks,
+            progress_callback=print,
         )
         if result.ok:
             print(result.message)

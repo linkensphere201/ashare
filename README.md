@@ -200,12 +200,14 @@ stock-picker provider fetch --config config/storage.yaml --source tushare --data
 For full-market historical pulls, avoid one large `start_date` / `end_date` request for `daily_prices` or `moneyflow_dc`; Tushare can cap returned rows. Use the resumable date-task runner instead. It reads current `trading_calendar`, creates one task per trading day and dataset, writes each successful task as a raw batch, and resumes from unfinished tasks when run again with the same `--run-id`:
 
 ```powershell
-stock-picker provider run-market-daily --config config/storage.yaml --run-id market_daily_1y_20260428 --dataset daily_prices --dataset moneyflow_dc --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28 --max-tasks 5 --requests-per-minute 40 --retry 3 --retry-wait-seconds 60 --symbol-batch-size 1000
+stock-picker provider run-market-daily --config config/storage.yaml --run-id market_daily_1y_20260428 --dataset daily_prices --dataset moneyflow_dc --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28 --max-tasks 300 --requests-per-minute 300 --retry 3 --retry-wait-seconds 60 --symbol-batch-size 1000 --progress-every-tasks 50
 ```
 
 Start with a small `--max-tasks`. Increase it only after confirming the account's Tushare rate limits are safe. The command stores task state in `metadata.sqlite.provider_run_tasks`; raw batches are promoted later with `storage promote-raw`.
 
 `daily_prices` tasks are split by trading day. `moneyflow_dc` can hit Tushare's single-request row cap even for one trading day, so it is split by trading day plus active-symbol batches from current `security_master`; tune that with `--symbol-batch-size`.
+
+Long runs print periodic progress by default. Tune the cadence with `--progress-every-tasks`; set it to `0` to disable progress lines.
 
 `cyq_perf` should be fetched by `--ts-code` first because the API is stock-code oriented:
 
@@ -224,10 +226,10 @@ Use a small `--limit` first. The command loops through symbols, calls Tushare `c
 For larger pulls, use the resumable run command. It stores progress in `metadata.sqlite.provider_runs` and continues from `next_offset` when run again with the same `--run-id`:
 
 ```powershell
-stock-picker provider run-cyq-perf-batches --config config/storage.yaml --run-id cyq_20260428 --start-date 2026-04-26 --end-date 2026-04-28 --as-of-date 2026-04-28 --batch-size 100 --max-batches 1 --delay-seconds 0.2
+stock-picker provider run-cyq-perf-batches --config config/storage.yaml --run-id cyq_20260428 --start-date 2026-04-26 --end-date 2026-04-28 --as-of-date 2026-04-28 --batch-size 100 --max-batches 1 --delay-seconds 0.35 --retry 3 --retry-wait-seconds 60 --backoff-multiplier 2 --progress-every-batches 1
 ```
 
-Run the same command again to continue the next batch. Increase `--max-batches` only after confirming provider rate limits are safe.
+Run the same command again to continue the next batch. Increase `--max-batches` only after confirming provider rate limits are safe. `cyq_perf` has shown a 200 requests/minute provider limit in real runs, so keep `--delay-seconds` below that limit and use retry/backoff for transient rate-limit responses. Tune progress output with `--progress-every-batches`; set it to `0` to disable progress lines.
 
 Promote raw batches into curated current Parquet:
 

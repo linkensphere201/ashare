@@ -917,6 +917,128 @@ def test_run_cyq_perf_batches_resumes_from_saved_offset(tmp_path: Path, monkeypa
     assert batch_rows == [("tushare_cyq_perf_20260428_001", 2), ("tushare_cyq_perf_20260428_002", 2)]
 
 
+def test_run_cyq_perf_batches_reports_progress(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    security_path = tmp_path / "data" / "curated" / "current" / "security_master" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ", "000004.SZ", "000006.SZ"],
+            "status": ["active", "active", "active", "active"],
+        }
+    ).write_parquet(security_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    progress_messages: list[str] = []
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, ts_code, start_date=None, end_date=None):
+            return pl.DataFrame(
+                {
+                    "ts_code": [ts_code],
+                    "trade_date": [end_date],
+                    "winner_rate": [80.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = run_cyq_perf_batches(
+        config_path=config_path,
+        run_id="cyq_progress_test",
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        batch_size=2,
+        max_batches=2,
+        progress_every_batches=1,
+        progress_callback=progress_messages.append,
+    )
+
+    assert result.ok
+    assert len(progress_messages) == 2
+    assert "this_invocation_batches=1/2" in progress_messages[0]
+    assert "next_offset=2/4" in progress_messages[0]
+    assert "last_batch=tushare_cyq_perf_20260428_001" in progress_messages[0]
+    assert "this_invocation_batches=2/2" in progress_messages[1]
+    assert "next_offset=4/4" in progress_messages[1]
+    assert "status=completed" in result.message
+    assert "recent_raw_batches=tushare_cyq_perf_20260428_001, tushare_cyq_perf_20260428_002" in result.message
+
+
+def test_run_cyq_perf_batches_retries_rate_limit_error(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    security_path = tmp_path / "data" / "curated" / "current" / "security_master" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ"],
+            "status": ["active", "active"],
+        }
+    ).write_parquet(security_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    monkeypatch.setattr(provider_module.time, "sleep", lambda seconds: None)
+    calls: dict[str, int] = {}
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, ts_code, start_date=None, end_date=None):
+            calls[ts_code] = calls.get(ts_code, 0) + 1
+            if ts_code == "000001.SZ" and calls[ts_code] == 1:
+                raise Exception("抱歉，您访问接口(cyq_perf)频率超限(200次/分钟)")
+            return pl.DataFrame(
+                {
+                    "ts_code": [ts_code],
+                    "trade_date": [end_date],
+                    "winner_rate": [80.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = run_cyq_perf_batches(
+        config_path=config_path,
+        run_id="cyq_retry_test",
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        batch_size=2,
+        max_batches=1,
+        retry=1,
+        retry_wait_seconds=0,
+    )
+
+    assert result.ok
+    assert calls == {"000001.SZ": 2, "000002.SZ": 1}
+    assert "next_offset=2/2" in result.message
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        run = connection.execute(
+            """
+            SELECT status, requested_symbols, symbols_with_rows, failed_symbols, row_count
+            FROM provider_runs
+            WHERE run_id = 'cyq_retry_test'
+            """
+        ).fetchone()
+    assert run == ("completed", 2, 2, 0, 2)
+
+
 def test_run_market_daily_resumes_by_trade_date_tasks(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
@@ -1122,6 +1244,64 @@ def test_run_market_daily_splits_moneyflow_by_symbol_batches(tmp_path: Path, mon
         ("moneyflow_dc", "2026-04-27", 0, 2, "success", 2),
         ("moneyflow_dc", "2026-04-27", 2, 3, "success", 1),
     ]
+
+
+def test_run_market_daily_reports_progress(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_trading_calendar_current(tmp_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    progress_messages: list[str] = []
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def daily(self, ts_code=None, trade_date=None, start_date=None, end_date=None):
+            return pl.DataFrame(
+                {
+                    "ts_code": ["600519.SH"],
+                    "trade_date": [trade_date],
+                    "open": [10.0],
+                    "high": [11.0],
+                    "low": [9.0],
+                    "close": [10.5],
+                    "pre_close": [10.0],
+                    "vol": [100.0],
+                    "amount": [1000.0],
+                    "pct_chg": [5.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = run_market_daily(
+        config_path=config_path,
+        run_id="market_daily_progress_test",
+        datasets=["daily_prices"],
+        start_date="2026-04-27",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        max_tasks=2,
+        requests_per_minute=0,
+        progress_every_tasks=1,
+        progress_callback=progress_messages.append,
+    )
+
+    assert result.ok
+    assert len(progress_messages) == 2
+    assert "this_invocation=1/2" in progress_messages[0]
+    assert "total_success=1/2" in progress_messages[0]
+    assert "last=daily_prices/2026-04-27" in progress_messages[0]
+    assert "this_invocation=2/2" in progress_messages[1]
+    assert "status=completed" in result.message
+    assert "batches_this_run=2" in result.message
+    assert "recent_raw_batches=tushare_daily_prices_20260428_001, tushare_daily_prices_20260428_002" in result.message
 
 
 def test_probe_provider_requires_tushare_token(monkeypatch) -> None:

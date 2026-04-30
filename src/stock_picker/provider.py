@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Callable
 
 import polars as pl
 
@@ -102,6 +103,9 @@ def fetch_cyq_perf_batch(
     limit: int | None = None,
     offset: int = 0,
     delay_seconds: float = 0.0,
+    retry: int = 3,
+    retry_wait_seconds: float = 60.0,
+    backoff_multiplier: float = 2.0,
     token_env: str = "TUSHARE_TOKEN",
 ) -> ProviderFetchResult:
     if source != "tushare":
@@ -112,6 +116,12 @@ def fetch_cyq_perf_batch(
         return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --offset")
     if delay_seconds < 0:
         return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --delay-seconds")
+    if retry < 0:
+        return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --retry")
+    if retry_wait_seconds < 0:
+        return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --retry-wait-seconds")
+    if backoff_multiplier < 1:
+        return ProviderFetchResult(False, "cyq_perf batch fetch requires --backoff-multiplier >= 1")
 
     token = os.environ.get(token_env)
     if not token:
@@ -138,12 +148,19 @@ def fetch_cyq_perf_batch(
 
     pro = ts.pro_api(token)
     for index, symbol in enumerate(selected_symbols):
-        try:
-            frame = _fetch_tushare_cyq_perf_for_symbol(pro, symbol, start_date, end_date)
-            if not frame.is_empty():
-                frames.append(frame)
-        except Exception as error:
+        frame, error = _fetch_tushare_cyq_perf_for_symbol_with_retry(
+            pro=pro,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            retry=retry,
+            retry_wait_seconds=retry_wait_seconds,
+            backoff_multiplier=backoff_multiplier,
+        )
+        if error:
             failures.append(f"{symbol}: {error}")
+        elif frame is not None and not frame.is_empty():
+            frames.append(frame)
         if delay_seconds and index < len(selected_symbols) - 1:
             time.sleep(delay_seconds)
 
@@ -183,6 +200,11 @@ def run_cyq_perf_batches(
     max_batches: int = 1,
     delay_seconds: float = 0.0,
     token_env: str = "TUSHARE_TOKEN",
+    progress_every_batches: int = 0,
+    progress_callback: Callable[[str], None] | None = None,
+    retry: int = 3,
+    retry_wait_seconds: float = 60.0,
+    backoff_multiplier: float = 2.0,
 ) -> ProviderFetchResult:
     if source != "tushare":
         return ProviderFetchResult(False, f"unsupported provider source: {source}")
@@ -192,6 +214,14 @@ def run_cyq_perf_batches(
         return ProviderFetchResult(False, "cyq_perf run requires a positive --max-batches")
     if delay_seconds < 0:
         return ProviderFetchResult(False, "cyq_perf run requires a non-negative --delay-seconds")
+    if progress_every_batches < 0:
+        return ProviderFetchResult(False, "cyq_perf run requires a non-negative --progress-every-batches")
+    if retry < 0:
+        return ProviderFetchResult(False, "cyq_perf run requires a non-negative --retry")
+    if retry_wait_seconds < 0:
+        return ProviderFetchResult(False, "cyq_perf run requires a non-negative --retry-wait-seconds")
+    if backoff_multiplier < 1:
+        return ProviderFetchResult(False, "cyq_perf run requires --backoff-multiplier >= 1")
 
     token = os.environ.get(token_env)
     if not token:
@@ -221,6 +251,7 @@ def run_cyq_perf_batches(
         return ProviderFetchResult(True, f"cyq_perf run already completed: {run['run_id']} next_offset={run['next_offset']}")
 
     batch_results: list[ProviderFetchResult] = []
+    started_at = time.monotonic()
     for _ in range(max_batches):
         next_offset = int(run["next_offset"])
         if next_offset >= len(all_symbols):
@@ -236,6 +267,9 @@ def run_cyq_perf_batches(
             limit=int(run["batch_size"]),
             offset=next_offset,
             delay_seconds=delay_seconds,
+            retry=retry,
+            retry_wait_seconds=retry_wait_seconds,
+            backoff_multiplier=backoff_multiplier,
             token_env=token_env,
         )
         if not result.ok:
@@ -254,6 +288,16 @@ def run_cyq_perf_batches(
             batch_id=str(result.batch_id),
         )
         run = _load_provider_run(config.metadata_sqlite_path, str(run["run_id"]))
+        if progress_callback and progress_every_batches and len(batch_results) % progress_every_batches == 0:
+            progress_callback(
+                _cyq_perf_progress_message(
+                    run=run,
+                    completed_batches=len(batch_results),
+                    max_batches=max_batches,
+                    elapsed_seconds=time.monotonic() - started_at,
+                    last_result=result,
+                )
+            )
         if int(run["next_offset"]) >= len(all_symbols):
             _mark_provider_run_completed(config.metadata_sqlite_path, str(run["run_id"]))
             run = _load_provider_run(config.metadata_sqlite_path, str(run["run_id"]))
@@ -264,7 +308,7 @@ def run_cyq_perf_batches(
         f"cyq_perf run: {run['run_id']} status={run['status']} "
         f"next_offset={run['next_offset']}/{run['total_symbols']} "
         f"batches={len(batch_results)} rows={run['row_count']} "
-        f"raw_batches={', '.join(json.loads(str(run['raw_batch_ids'])))}"
+        f"recent_raw_batches={', '.join(json.loads(str(run['raw_batch_ids']))[-5:])}"
     )
     return ProviderFetchResult(True, message, last.batch_id if last else None, last.raw_path if last else None, int(run["row_count"]))
 
@@ -284,6 +328,8 @@ def run_market_daily(
     backoff_multiplier: float = 2.0,
     symbol_batch_size: int = 1000,
     token_env: str = "TUSHARE_TOKEN",
+    progress_every_tasks: int = 0,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> ProviderFetchResult:
     if source != "tushare":
         return ProviderFetchResult(False, f"unsupported provider source: {source}")
@@ -305,6 +351,8 @@ def run_market_daily(
         return ProviderFetchResult(False, "market daily run requires --backoff-multiplier >= 1")
     if symbol_batch_size <= 0:
         return ProviderFetchResult(False, "market daily run requires a positive --symbol-batch-size")
+    if progress_every_tasks < 0:
+        return ProviderFetchResult(False, "market daily run requires a non-negative --progress-every-tasks")
 
     token = os.environ.get(token_env)
     if not token:
@@ -351,6 +399,7 @@ def run_market_daily(
 
     completed: list[ProviderFetchResult] = []
     last_request_at: float | None = None
+    started_at = time.monotonic()
     for _ in range(max_tasks):
         task = _next_market_daily_task(config.metadata_sqlite_path, selected_run_id)
         if task is None:
@@ -373,6 +422,18 @@ def run_market_daily(
             _update_provider_run_failure(config.metadata_sqlite_path, selected_run_id, result.message)
             return result
         completed.append(result)
+        if progress_callback and progress_every_tasks and len(completed) % progress_every_tasks == 0:
+            progress_callback(
+                _market_daily_progress_message(
+                    sqlite_path=config.metadata_sqlite_path,
+                    run_id=selected_run_id,
+                    completed_this_invocation=len(completed),
+                    max_tasks=max_tasks,
+                    elapsed_seconds=time.monotonic() - started_at,
+                    last_task=task,
+                    last_result=result,
+                )
+            )
 
     stats = _market_daily_run_stats(config.metadata_sqlite_path, selected_run_id)
     if stats["remaining"] == 0:
@@ -382,11 +443,13 @@ def run_market_daily(
         status = "running"
     _update_market_daily_run_summary(config.metadata_sqlite_path, selected_run_id, status=status)
     batch_ids = [str(result.batch_id) for result in completed if result.batch_id]
+    recent_batches = batch_ids[-5:]
     message = (
         f"market daily run: {selected_run_id} status={status} "
         f"tasks_success={stats['success']}/{stats['total']} "
         f"tasks_failed={stats['failed']} tasks_remaining={stats['remaining']} "
-        f"rows={stats['rows']} raw_batches={', '.join(batch_ids)}"
+        f"rows={stats['rows']} batches_this_run={len(batch_ids)} "
+        f"recent_raw_batches={', '.join(recent_batches)}"
     )
     last = completed[-1] if completed else None
     return ProviderFetchResult(True, message, last.batch_id if last else None, last.raw_path if last else None, int(stats["rows"]))
@@ -574,6 +637,30 @@ def _fetch_tushare_cyq_perf_for_symbol(
         end_date=_compact_date(end_date),
     )
     return pl.from_pandas(pandas_frame)
+
+
+def _fetch_tushare_cyq_perf_for_symbol_with_retry(
+    pro: object,
+    symbol: str,
+    start_date: str | None,
+    end_date: str | None,
+    retry: int,
+    retry_wait_seconds: float,
+    backoff_multiplier: float,
+) -> tuple[pl.DataFrame | None, str | None]:
+    max_attempts = retry + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _fetch_tushare_cyq_perf_for_symbol(pro, symbol, start_date, end_date), None
+        except Exception as error:
+            message = str(error)
+            if _is_permission_error(message):
+                return None, message
+            if attempt >= max_attempts:
+                return None, message
+            wait_seconds = retry_wait_seconds * (backoff_multiplier ** (attempt - 1))
+            time.sleep(wait_seconds)
+    return None, "cyq_perf fetch failed unexpectedly"
 
 
 def _load_trading_dates(path: Path, start_date: str, end_date: str) -> list[str]:
@@ -877,6 +964,56 @@ def _market_daily_run_stats(sqlite_path: Path, run_id: str) -> dict[str, int]:
         "remaining": int(row[3] or 0),
         "rows": int(row[4] or 0),
     }
+
+
+def _market_daily_progress_message(
+    sqlite_path: Path,
+    run_id: str,
+    completed_this_invocation: int,
+    max_tasks: int,
+    elapsed_seconds: float,
+    last_task: dict[str, object],
+    last_result: ProviderFetchResult,
+) -> str:
+    stats = _market_daily_run_stats(sqlite_path, run_id)
+    rate = completed_this_invocation / elapsed_seconds * 60 if elapsed_seconds > 0 else 0.0
+    symbol_range = ""
+    if last_task.get("symbol_start_offset") is not None and last_task.get("symbol_end_offset") is not None:
+        symbol_range = f" symbols={last_task['symbol_start_offset']}-{last_task['symbol_end_offset']}"
+    return (
+        f"progress run_id={run_id} "
+        f"this_invocation={completed_this_invocation}/{max_tasks} "
+        f"total_success={stats['success']}/{stats['total']} "
+        f"failed={stats['failed']} remaining={stats['remaining']} "
+        f"rows={stats['rows']} "
+        f"last={last_task['dataset_name']}/{last_task['trade_date']}{symbol_range} "
+        f"last_rows={last_result.row_count} "
+        f"rate={rate:.1f}_tasks_per_min"
+    )
+
+
+def _cyq_perf_progress_message(
+    run: dict[str, object],
+    completed_batches: int,
+    max_batches: int,
+    elapsed_seconds: float,
+    last_result: ProviderFetchResult,
+) -> str:
+    rate = completed_batches / elapsed_seconds * 60 if elapsed_seconds > 0 else 0.0
+    requested = int(run["requested_symbols"])
+    failed = int(run["failed_symbols"])
+    symbols_with_rows = int(run["symbols_with_rows"])
+    next_offset = int(run["next_offset"])
+    total_symbols = int(run["total_symbols"])
+    return (
+        f"progress run_id={run['run_id']} "
+        f"this_invocation_batches={completed_batches}/{max_batches} "
+        f"next_offset={next_offset}/{total_symbols} "
+        f"requested_symbols={requested} symbols_with_rows={symbols_with_rows} "
+        f"failed_symbols={failed} rows={run['row_count']} "
+        f"last_batch={last_result.batch_id} last_rows={last_result.row_count} "
+        f"rate={rate:.1f}_batches_per_min"
+    )
 
 
 def _update_market_daily_run_summary(sqlite_path: Path, run_id: str, status: str) -> None:
