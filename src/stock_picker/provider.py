@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +86,86 @@ def fetch_provider_raw(
         dataset=dataset,
         frame=frame,
         as_of_date=as_of_date or trade_date or end_date or start_date or datetime.now(UTC).date().isoformat(),
+    )
+
+
+def fetch_cyq_perf_batch(
+    config_path: Path,
+    source: str = "tushare",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    as_of_date: str | None = None,
+    symbols: list[str] | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+    delay_seconds: float = 0.0,
+    token_env: str = "TUSHARE_TOKEN",
+) -> ProviderFetchResult:
+    if source != "tushare":
+        return ProviderFetchResult(False, f"unsupported provider source: {source}")
+    if limit is not None and limit <= 0:
+        return ProviderFetchResult(False, "cyq_perf batch fetch requires a positive --limit")
+    if offset < 0:
+        return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --offset")
+    if delay_seconds < 0:
+        return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --delay-seconds")
+
+    token = os.environ.get(token_env)
+    if not token:
+        return ProviderFetchResult(False, f"missing required environment variable: {token_env}")
+
+    config = load_storage_config(config_path)
+    initialize_metadata_catalog(config.metadata_sqlite_path)
+    try:
+        selected_symbols = symbols or _load_security_master_symbols(config.current_curated_root / "security_master" / "part-000.parquet")
+    except ValueError as error:
+        return ProviderFetchResult(False, str(error))
+    selected_symbols = selected_symbols[offset:]
+    if limit is not None:
+        selected_symbols = selected_symbols[:limit]
+    if not selected_symbols:
+        return ProviderFetchResult(False, "cyq_perf batch fetch found no symbols to fetch")
+
+    frames: list[pl.DataFrame] = []
+    failures: list[str] = []
+    try:
+        import tushare as ts  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        return ProviderFetchResult(False, "missing dependency: install tushare to fetch provider data")
+
+    pro = ts.pro_api(token)
+    for index, symbol in enumerate(selected_symbols):
+        try:
+            frame = _fetch_tushare_cyq_perf_for_symbol(pro, symbol, start_date, end_date)
+            if not frame.is_empty():
+                frames.append(frame)
+        except Exception as error:
+            failures.append(f"{symbol}: {error}")
+        if delay_seconds and index < len(selected_symbols) - 1:
+            time.sleep(delay_seconds)
+
+    if not frames:
+        failure_note = "; ".join(failures[:5])
+        suffix = f"; failures: {failure_note}" if failure_note else ""
+        return ProviderFetchResult(False, f"cyq_perf batch fetch returned no rows{suffix}")
+
+    combined = pl.concat(frames, how="diagonal_relaxed")
+    result = write_raw_batch(
+        config_path=config_path,
+        source=source,
+        dataset="cyq_perf",
+        frame=combined,
+        as_of_date=as_of_date or end_date or start_date or datetime.now(UTC).date().isoformat(),
+    )
+    if not result.ok:
+        return result
+    failure_summary = f" failures={len(failures)}" if failures else " failures=0"
+    return ProviderFetchResult(
+        True,
+        f"{result.message} symbols_requested={len(selected_symbols)} symbols_with_rows={len(frames)}{failure_summary}",
+        result.batch_id,
+        result.raw_path,
+        result.row_count,
     )
 
 
@@ -258,6 +339,20 @@ def _fetch_tushare_dataset(
     return pl.from_pandas(pandas_frame)
 
 
+def _fetch_tushare_cyq_perf_for_symbol(
+    pro: object,
+    symbol: str,
+    start_date: str | None,
+    end_date: str | None,
+) -> pl.DataFrame:
+    pandas_frame = pro.cyq_perf(
+        ts_code=symbol,
+        start_date=_compact_date(start_date),
+        end_date=_compact_date(end_date),
+    )
+    return pl.from_pandas(pandas_frame)
+
+
 def _probe_tushare_api(
     token: str,
     api: str,
@@ -333,6 +428,17 @@ def _next_batch_id(sqlite_path: Path, source: str, dataset: str, as_of_date: str
         if suffix.isdigit():
             max_suffix = max(max_suffix, int(suffix))
     return f"{prefix}{max_suffix + 1:03d}"
+
+
+def _load_security_master_symbols(path: Path) -> list[str]:
+    if not path.exists():
+        raise ValueError(f"security_master current Parquet not found: {path}")
+    frame = pl.read_parquet(path)
+    if "symbol" not in frame.columns:
+        raise ValueError("security_master current Parquet is missing column: symbol")
+    if "status" in frame.columns:
+        frame = frame.filter(pl.col("status") == "active")
+    return frame.select("symbol").drop_nulls().unique().sort("symbol").to_series().to_list()
 
 
 def _sha256_file(path: Path) -> str:

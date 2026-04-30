@@ -7,7 +7,7 @@ from pathlib import Path
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
 from stock_picker.display import inspect_run, list_runs, preview_curated
-from stock_picker.provider import fetch_provider_raw, probe_provider_api
+from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api
 from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
@@ -54,6 +54,25 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_cmd.add_argument("--as-of-date", help="Business as-of date for the raw batch")
     fetch_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
     fetch_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    fetch_cyq_batch_cmd = provider_subparsers.add_parser(
+        "fetch-cyq-perf-batch",
+        help="Fetch Tushare cyq_perf for multiple symbols into one raw batch",
+    )
+    fetch_cyq_batch_cmd.add_argument("--source", default="tushare", help="Provider source, currently tushare")
+    fetch_cyq_batch_cmd.add_argument(
+        "--symbol",
+        action="append",
+        help="Optional symbol to fetch; repeat for multiple symbols. Defaults to active security_master symbols.",
+    )
+    fetch_cyq_batch_cmd.add_argument("--start-date", help="Start date, such as 2026-01-01")
+    fetch_cyq_batch_cmd.add_argument("--end-date", help="End date, such as 2026-04-28")
+    fetch_cyq_batch_cmd.add_argument("--as-of-date", help="Business as-of date for the raw batch")
+    fetch_cyq_batch_cmd.add_argument("--limit", type=int, help="Maximum symbols to fetch")
+    fetch_cyq_batch_cmd.add_argument("--offset", type=int, default=0, help="Number of symbols to skip")
+    fetch_cyq_batch_cmd.add_argument("--delay-seconds", type=float, default=0.0, help="Sleep between symbol requests")
+    fetch_cyq_batch_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
+    fetch_cyq_batch_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     probe_cmd = provider_subparsers.add_parser("probe", help="Probe provider API access and expected fields")
     probe_cmd.add_argument("--source", required=True, help="Provider source, such as tushare")
@@ -289,6 +308,25 @@ def main(argv: list[str] | None = None) -> int:
             as_of_date=args.as_of_date,
             ts_code=args.ts_code,
             trade_date=args.trade_date,
+            token_env=args.token_env,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "provider" and args.provider_command == "fetch-cyq-perf-batch":
+        result = fetch_cyq_perf_batch(
+            config_path=Path(args.config),
+            source=args.source,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            as_of_date=args.as_of_date,
+            symbols=args.symbol,
+            limit=args.limit,
+            offset=args.offset,
+            delay_seconds=args.delay_seconds,
             token_env=args.token_env,
         )
         if result.ok:

@@ -7,7 +7,7 @@ import polars as pl
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
 from stock_picker.display import inspect_run, list_runs, preview_curated
-from stock_picker.provider import fetch_provider_raw, probe_provider_api, write_raw_batch
+from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, write_raw_batch
 from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
@@ -688,6 +688,68 @@ def test_fetch_cyq_perf_requires_ts_code(tmp_path: Path) -> None:
 
     assert not result.ok
     assert result.message == "cyq_perf fetch requires --ts-code"
+
+
+def test_fetch_cyq_perf_batch_requires_tushare_token(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+
+    result = fetch_cyq_perf_batch(config_path=config_path)
+
+    assert not result.ok
+    assert result.message == "missing required environment variable: TUSHARE_TOKEN"
+
+
+def test_fetch_cyq_perf_batch_writes_combined_raw_batch(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    security_path = tmp_path / "data" / "curated" / "current" / "security_master" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ", "300750.SZ"],
+            "status": ["active", "active", "active"],
+        }
+    ).write_parquet(security_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, ts_code, start_date=None, end_date=None):
+            return pl.DataFrame(
+                {
+                    "ts_code": [ts_code],
+                    "trade_date": [end_date],
+                    "winner_rate": [85.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = fetch_cyq_perf_batch(
+        config_path=config_path,
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        limit=2,
+    )
+
+    assert result.ok
+    assert result.batch_id == "tushare_cyq_perf_20260428_001"
+    assert result.raw_path is not None
+    frame = pl.read_csv(result.raw_path)
+    assert frame.height == 2
+    assert sorted(frame.select("ts_code").to_series().to_list()) == ["000001.SZ", "300750.SZ"]
+    assert "symbols_requested=2" in result.message
+    assert "symbols_with_rows=2" in result.message
 
 
 def test_probe_provider_requires_tushare_token(monkeypatch) -> None:

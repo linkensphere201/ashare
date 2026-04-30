@@ -119,6 +119,56 @@ The normal MVP path is:
 Tushare API -> raw CSV batches -> curated Parquet -> quality check -> snapshot -> strategy ranking/backtest
 ```
 
+```mermaid
+flowchart TD
+    Tushare[Tushare API] --> Probe[provider probe]
+    Tushare --> Fetch[provider fetch / fetch-cyq-perf-batch]
+
+    Fetch --> RawStore[(Raw Store<br/>data/raw/source=...)]
+    RawStore --> Batches[(metadata.sqlite<br/>data_batches)]
+
+    Batches --> Promote[storage promote-raw]
+    RawStore --> Promote
+
+    Promote --> Security[(curated/security_master)]
+    Promote --> Calendar[(curated/trading_calendar)]
+    Promote --> Prices[(curated/daily_prices)]
+    Promote --> FlowChip[(curated/capital_flow_or_chip)]
+    Promote --> CuratedVersions[(metadata.sqlite<br/>curated_versions)]
+
+    Security --> Quality[storage check-quality]
+    Calendar --> Quality
+    Prices --> Quality
+    FlowChip --> Quality
+    CuratedVersions --> Quality
+
+    Quality --> Snapshot[storage create-snapshot]
+    Snapshot --> Manifests[(metadata.sqlite<br/>snapshot_manifests)]
+
+    Manifests --> Rank[strategy rank-candidate-001]
+    Security --> Rank
+    Prices --> Rank
+    FlowChip --> Rank
+
+    Manifests --> Backtest[strategy backtest-candidate-001]
+    Prices --> Backtest
+    FlowChip --> Backtest
+
+    Batches --> Display[CLI display commands]
+    CuratedVersions --> Display
+    Manifests --> Display
+    Security --> Display
+    Prices --> Display
+    FlowChip --> Display
+```
+
+The data store is layered:
+
+- Raw provider responses are stored as CSV batches under `data/raw/` and registered in `data_batches`.
+- Standardized current datasets are stored as Parquet under `data/curated/current/` and registered in `curated_versions`.
+- Snapshots are logical manifests in `snapshot_manifests`; they point to exact curated versions for reproducible strategy and backtest runs.
+- CLI display commands are read-only views over metadata plus curated Parquet.
+
 Supported first-pass Tushare datasets:
 
 | Dataset | Tushare API | Curated Target | Purpose |
@@ -150,6 +200,14 @@ stock-picker provider fetch --config config/storage.yaml --source tushare --data
 ```powershell
 stock-picker provider fetch --config config/storage.yaml --source tushare --dataset cyq_perf --ts-code 600519.SH --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
 ```
+
+Fetch `cyq_perf` for multiple symbols from the current `security_master` list:
+
+```powershell
+stock-picker provider fetch-cyq-perf-batch --config config/storage.yaml --start-date 2026-04-26 --end-date 2026-04-28 --as-of-date 2026-04-28 --limit 50
+```
+
+Use a small `--limit` first. The command loops through symbols, calls Tushare `cyq_perf`, combines successful rows into one raw `cyq_perf` batch, and records it in `data_batches`.
 
 Promote raw batches into curated current Parquet:
 
@@ -246,6 +304,7 @@ stock-picker storage check-quality --config config/storage.yaml --dataset daily_
 | --- | --- |
 | `stock-picker provider probe` | Run a small Tushare API request and check expected fields |
 | `stock-picker provider fetch` | Fetch a Tushare dataset into raw CSV storage and record metadata |
+| `stock-picker provider fetch-cyq-perf-batch` | Fetch Tushare `cyq_perf` for multiple symbols into one raw batch |
 
 Supported probe APIs:
 
