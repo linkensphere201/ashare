@@ -510,12 +510,19 @@ def _map_tushare_raw_to_curated(frame: pl.DataFrame, dataset: str) -> pl.DataFra
             ]
         ).select(["symbol", "trade_date", "main_net_inflow", "main_net_inflow_rate", "data_method"])
     if dataset == "cyq_perf":
+        data_method = (
+            pl.when(pl.col("provider_status") == "not_found")
+            .then(pl.lit("tushare_cyq_perf:not_found"))
+            .otherwise(pl.lit("tushare_cyq_perf"))
+            if "provider_status" in frame.columns
+            else pl.lit("tushare_cyq_perf")
+        )
         return frame.with_columns(
             [
                 pl.col("ts_code").alias("symbol"),
                 _parse_yyyymmdd("trade_date").alias("trade_date"),
                 pl.col("winner_rate").alias("close_profit_ratio"),
-                pl.lit("tushare_cyq_perf").alias("data_method"),
+                data_method.alias("data_method"),
             ]
         ).select(["symbol", "trade_date", "close_profit_ratio", "data_method"])
     raise ValueError(f"unsupported raw dataset mapping: {dataset}")

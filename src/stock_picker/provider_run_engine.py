@@ -112,6 +112,7 @@ def execute_provider_run(
     task_specs = adapter.plan_tasks(run_spec)
     _ensure_run(sqlite_path, run_spec, len(task_specs))
     _ensure_tasks(sqlite_path, task_specs)
+    _resume_run_if_unfinished(sqlite_path, run_spec.run_id)
 
     completed = 0
     last_result: TaskExecutionResult | None = None
@@ -254,6 +255,22 @@ def _ensure_run(sqlite_path: Path, run_spec: ProviderRunSpec, total_tasks: int) 
                 now,
                 "provider task engine",
             ),
+        )
+
+
+def _resume_run_if_unfinished(sqlite_path: Path, run_id: str) -> None:
+    stats = _run_stats(sqlite_path, run_id)
+    if stats["remaining"] == 0:
+        return
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            UPDATE provider_runs
+            SET status = 'running', updated_at = ?
+            WHERE run_id = ? AND status != 'running'
+            """,
+            (now, run_id),
         )
 
 

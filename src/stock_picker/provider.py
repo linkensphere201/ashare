@@ -523,13 +523,10 @@ class CyqPerfTaskAdapter:
             except Exception as error:
                 return TaskExecutionResult(False, error=classify_tushare_error(error))
             if frame.is_empty():
-                return TaskExecutionResult(
-                    False,
-                    error=ProviderTaskError(
-                        ProviderErrorReason.EMPTY_RESULT,
-                        f"cyq_perf returned no rows for symbol: {symbol}",
-                        retryable=False,
-                    ),
+                frame = _cyq_perf_not_found_frame(
+                    symbol=symbol,
+                    start_date=str(task["start_date"] or "") or None,
+                    end_date=str(task["end_date"] or "") or None,
                 )
             frames.append(frame)
             if self.delay_seconds and index < len(selected_symbols) - 1:
@@ -552,6 +549,31 @@ def _provider_run_result_to_fetch_result(label: str, result: ProviderRunResult) 
     if not result.ok:
         return ProviderFetchResult(False, result.message, result.last_raw_batch_id, None, result.row_count)
     return ProviderFetchResult(True, result.message.replace("provider run:", f"{label} run:"), result.last_raw_batch_id, None, result.row_count)
+
+
+def _cyq_perf_not_found_frame(symbol: str, start_date: str | None, end_date: str | None) -> pl.DataFrame:
+    request_start_date = _compact_date(start_date)
+    request_end_date = _compact_date(end_date or start_date)
+    return pl.DataFrame(
+        {
+            "ts_code": [symbol],
+            "trade_date": [request_end_date],
+            "winner_rate": [None],
+            "request_start_date": [request_start_date],
+            "request_end_date": [request_end_date],
+            "provider_status": ["not_found"],
+            "provider_message": ["empty_result"],
+        },
+        schema={
+            "ts_code": pl.Utf8,
+            "trade_date": pl.Utf8,
+            "winner_rate": pl.Float64,
+            "request_start_date": pl.Utf8,
+            "request_end_date": pl.Utf8,
+            "provider_status": pl.Utf8,
+            "provider_message": pl.Utf8,
+        },
+    )
 
 
 def probe_provider_api(

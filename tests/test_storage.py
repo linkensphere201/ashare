@@ -1061,6 +1061,153 @@ def test_run_cyq_perf_batches_retries_rate_limit_error(tmp_path: Path, monkeypat
     assert task == ("success", 2, None, 2, "tushare_cyq_perf_20260428_001")
 
 
+def test_run_cyq_perf_batches_writes_not_found_placeholder_for_empty_result(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    _write_capital_flow_schema(tmp_path)
+    assert init_storage(config_path).ok
+    assert register_schemas(config_path).ok
+    security_path = tmp_path / "data" / "curated" / "current" / "security_master" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ", "000004.SZ"],
+            "status": ["active", "active", "active"],
+        }
+    ).write_parquet(security_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, ts_code, start_date=None, end_date=None):
+            if ts_code == "000002.SZ":
+                return pl.DataFrame({"ts_code": [], "trade_date": [], "winner_rate": []}).to_pandas()
+            return pl.DataFrame(
+                {
+                    "ts_code": [ts_code],
+                    "trade_date": [end_date],
+                    "winner_rate": [80.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = run_cyq_perf_batches(
+        config_path=config_path,
+        run_id="cyq_not_found_test",
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        batch_size=3,
+        max_batches=1,
+    )
+
+    assert result.ok
+    assert "tasks_success=1/1" in result.message
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        raw_path = connection.execute(
+            "SELECT raw_path FROM data_batches WHERE batch_id = ?",
+            (result.batch_id,),
+        ).fetchone()[0]
+    raw = pl.read_csv(raw_path).sort("ts_code")
+    assert raw.select("ts_code", "trade_date", "winner_rate", "provider_status", "provider_message").to_dicts() == [
+        {"ts_code": "000001.SZ", "trade_date": 20260428, "winner_rate": 80.0, "provider_status": None, "provider_message": None},
+        {"ts_code": "000002.SZ", "trade_date": 20260428, "winner_rate": None, "provider_status": "not_found", "provider_message": "empty_result"},
+        {"ts_code": "000004.SZ", "trade_date": 20260428, "winner_rate": 80.0, "provider_status": None, "provider_message": None},
+    ]
+
+    promote = promote_raw_batch(config_path, "tushare", "cyq_perf", "2026-04-28")
+    assert promote.ok
+    curated = pl.read_parquet(tmp_path / "data" / "curated" / "current" / "capital_flow_or_chip" / "part-000.parquet")
+    missing = curated.filter(pl.col("symbol") == "000002.SZ").to_dicts()[0]
+    assert missing["close_profit_ratio"] is None
+    assert missing["data_method"] == "tushare_cyq_perf:not_found"
+
+
+def test_provider_run_resume_marks_failed_run_running_before_continuing(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    security_path = tmp_path / "data" / "curated" / "current" / "security_master" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ", "000004.SZ"],
+            "status": ["active", "active", "active"],
+        }
+    ).write_parquet(security_path)
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    fail_first = True
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, ts_code, start_date=None, end_date=None):
+            nonlocal fail_first
+            if fail_first and ts_code == "000001.SZ":
+                raise Exception("provider internal error")
+            return pl.DataFrame(
+                {
+                    "ts_code": [ts_code],
+                    "trade_date": [end_date],
+                    "winner_rate": [80.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    first = run_cyq_perf_batches(
+        config_path=config_path,
+        run_id="cyq_resume_status_test",
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        batch_size=2,
+        max_batches=1,
+    )
+    assert not first.ok
+    fail_first = False
+    second = run_cyq_perf_batches(
+        config_path=config_path,
+        run_id="cyq_resume_status_test",
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        batch_size=2,
+        max_batches=1,
+    )
+
+    assert second.ok
+    assert "status=running" in second.message
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        run_status = connection.execute(
+            "SELECT status FROM provider_runs WHERE run_id = 'cyq_resume_status_test'"
+        ).fetchone()
+        tasks = connection.execute(
+            """
+            SELECT symbol_start_offset, symbol_end_offset, status, attempts, error_reason
+            FROM provider_run_tasks
+            WHERE run_id = 'cyq_resume_status_test'
+            ORDER BY symbol_start_offset
+            """
+        ).fetchall()
+    assert run_status == ("running",)
+    assert tasks == [(0, 2, "success", 1, None), (2, 3, "pending", 0, None)]
+
+
 def test_run_cyq_perf_batches_stops_non_retryable_failure_without_partial_raw(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
