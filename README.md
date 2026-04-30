@@ -169,6 +169,24 @@ stock-picker storage create-snapshot --config config/storage.yaml --as-of-date 2
 stock-picker storage inspect-snapshot --config config/storage.yaml --snapshot-id snapshot_20260428_001
 ```
 
+Preview curated standard-layer rows as a PrettyTable:
+
+```powershell
+stock-picker storage preview-curated --config config/storage.yaml --dataset daily_prices --symbol 600519.SH --limit 20
+```
+
+List raw data import runs as a PrettyTable:
+
+```powershell
+stock-picker storage list-runs --config config/storage.yaml --limit 20
+```
+
+Inspect one raw data import run and its linked curated/snapshot outputs:
+
+```powershell
+stock-picker storage inspect-run --config config/storage.yaml --batch-id tushare_daily_prices_20260428_001
+```
+
 ## Strategy Commands
 
 Strategy Candidate 001 v2 uses:
@@ -206,6 +224,9 @@ The output is a research/watchlist result, not direct buy or sell advice.
 | `stock-picker storage import-curated-csv` | Import a local CSV into curated current Parquet |
 | `stock-picker storage promote-raw` | Promote a raw provider batch into curated current Parquet |
 | `stock-picker storage inspect-curated` | Inspect current curated metadata and Parquet columns for one dataset |
+| `stock-picker storage preview-curated` | Preview standard-layer rows, with stock name, daily percentage change, price, and optional selected fields |
+| `stock-picker storage list-runs` | List raw data import runs and their row counts/status |
+| `stock-picker storage inspect-run` | Inspect one raw run plus linked curated versions and snapshots |
 | `stock-picker storage check-quality` | Run MVP data quality checks against curated datasets |
 | `stock-picker storage create-snapshot` | Create a logical snapshot manifest from current curated versions |
 | `stock-picker storage inspect-snapshot` | Inspect a stored snapshot manifest |

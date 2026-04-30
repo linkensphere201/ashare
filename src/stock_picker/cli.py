@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
+from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.provider import fetch_provider_raw, probe_provider_api
 from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
@@ -102,6 +103,32 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_curated_cmd.add_argument("--dataset", required=True, help="Registered dataset id")
     inspect_curated_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
+    preview_curated_cmd = storage_subparsers.add_parser(
+        "preview-curated",
+        help="Preview curated current rows for human inspection",
+    )
+    preview_curated_cmd.add_argument("--dataset", required=True, help="Registered dataset id")
+    preview_curated_cmd.add_argument("--symbol", help="Optional symbol filter, such as 600519.SH")
+    preview_curated_cmd.add_argument("--start-date", help="Optional inclusive start date, such as 2026-04-26")
+    preview_curated_cmd.add_argument("--end-date", help="Optional inclusive end date, such as 2026-04-28")
+    preview_curated_cmd.add_argument("--columns", help="Optional comma-separated columns to display")
+    preview_curated_cmd.add_argument("--limit", type=int, default=20, help="Maximum rows to display")
+    preview_curated_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    list_runs_cmd = storage_subparsers.add_parser(
+        "list-runs",
+        help="List raw data import runs from the metadata catalog",
+    )
+    list_runs_cmd.add_argument("--limit", type=int, default=20, help="Maximum runs to display")
+    list_runs_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    inspect_run_cmd = storage_subparsers.add_parser(
+        "inspect-run",
+        help="Inspect one raw data import run and linked curated/snapshot outputs",
+    )
+    inspect_run_cmd.add_argument("--batch-id", required=True, help="Raw data batch id")
+    inspect_run_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
     check_quality_cmd = storage_subparsers.add_parser(
         "check-quality",
         help="Run MVP quality checks against curated current datasets",
@@ -186,6 +213,38 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "storage" and args.storage_command == "inspect-curated":
         result = inspect_curated(Path(args.config), args.dataset)
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "storage" and args.storage_command == "preview-curated":
+        result = preview_curated(
+            config_path=Path(args.config),
+            dataset_id=args.dataset,
+            symbol=args.symbol,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            columns=args.columns,
+            limit=args.limit,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "storage" and args.storage_command == "list-runs":
+        result = list_runs(Path(args.config), args.limit)
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "storage" and args.storage_command == "inspect-run":
+        result = inspect_run(Path(args.config), args.batch_id)
         if result.ok:
             print(result.message)
             return 0

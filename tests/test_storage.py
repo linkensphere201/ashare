@@ -6,6 +6,7 @@ import sqlite3
 import polars as pl
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch
+from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.provider import fetch_provider_raw, probe_provider_api, write_raw_batch
 from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
@@ -240,6 +241,146 @@ def test_fetch_provider_requires_tushare_token(tmp_path: Path, monkeypatch) -> N
 
     assert not result.ok
     assert result.message == "missing required environment variable: TUSHARE_TOKEN"
+
+
+def test_preview_curated_daily_prices_shows_default_stock_fields(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    data_root = tmp_path / "data" / "curated" / "current"
+    security_path = data_root / "security_master" / "part-000.parquet"
+    daily_path = data_root / "daily_prices" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    daily_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "name": ["Kweichow Moutai"],
+        }
+    ).write_parquet(security_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "trade_date": [date(2026, 4, 28)],
+            "pct_change": [0.72],
+            "close": [1690.0],
+            "amount": [3549000.0],
+        }
+    ).write_parquet(daily_path)
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO curated_versions (
+              curated_version_id,
+              dataset_id,
+              schema_version_id,
+              version_type,
+              snapshot_id,
+              path,
+              as_of_date,
+              created_at,
+              source_batch_ids,
+              row_count,
+              checksum,
+              status
+            )
+            VALUES ('security_master_current_20260428', 'security_master', 'security_master_schema_v001', 'current', NULL, ?, '2026-04-28', '2026-04-28T16:00:00+00:00', '[]', 1, 'test', 'active')
+            """,
+            (str(security_path),),
+        )
+        connection.execute(
+            """
+            INSERT INTO curated_versions (
+              curated_version_id,
+              dataset_id,
+              schema_version_id,
+              version_type,
+              snapshot_id,
+              path,
+              as_of_date,
+              created_at,
+              source_batch_ids,
+              row_count,
+              checksum,
+              status
+            )
+            VALUES ('daily_prices_current_20260428', 'daily_prices', 'daily_prices_schema_v001', 'current', NULL, ?, '2026-04-28', '2026-04-28T16:00:00+00:00', '[]', 1, 'test', 'active')
+            """,
+            (str(daily_path),),
+        )
+
+    result = preview_curated(config_path, "daily_prices", symbol="600519.SH", limit=5)
+
+    assert result.ok
+    assert "curated_preview: daily_prices" in result.message
+    assert "| symbol    | name            | trade_date | pct_change | close  |" in result.message
+    assert "| 600519.SH | Kweichow Moutai | 2026-04-28 | 0.72       | 1690.0 |" in result.message
+
+
+def test_list_and_inspect_runs_show_lineage(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    raw = pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "close": [1690.0]})
+    batch = write_raw_batch(config_path, "tushare", "daily_prices", raw, "2026-04-28")
+    assert batch.ok
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO curated_versions (
+              curated_version_id,
+              dataset_id,
+              schema_version_id,
+              version_type,
+              snapshot_id,
+              path,
+              as_of_date,
+              created_at,
+              source_batch_ids,
+              row_count,
+              checksum,
+              status
+            )
+            VALUES ('daily_prices_current_20260428', 'daily_prices', 'daily_prices_schema_v001', 'current', NULL, 'data/curated/current/daily_prices/part-000.parquet', '2026-04-28', '2026-04-28T16:00:00+00:00', ?, 1, 'curated-checksum', 'active')
+            """,
+            (json.dumps([batch.batch_id]),),
+        )
+        manifest = {
+            "curated_versions": {
+                "daily_prices": {
+                    "curated_version_id": "daily_prices_current_20260428",
+                    "row_count": 1,
+                }
+            }
+        }
+        connection.execute(
+            """
+            INSERT INTO snapshot_manifests (
+              snapshot_id,
+              as_of_date,
+              created_at,
+              data_frequency,
+              config_version,
+              manifest_json,
+              notes
+            )
+            VALUES ('snapshot_20260428_001', '2026-04-28', '2026-04-28T16:00:00+00:00', 'daily', 'test', ?, NULL)
+            """,
+            (json.dumps(manifest),),
+        )
+
+    runs = list_runs(config_path, limit=10)
+    detail = inspect_run(config_path, str(batch.batch_id))
+
+    assert runs.ok
+    assert "total_import_runs: 1" in runs.message
+    assert str(batch.batch_id) in runs.message
+    assert detail.ok
+    assert f"batch_id: {batch.batch_id}" in detail.message
+    assert "linked_curated_versions:" in detail.message
+    assert "| daily_prices_current_20260428 | daily_prices | daily_prices_schema_v001 | 2026-04-28 | 1         | active | curated-checksum |" in detail.message
+    assert "linked_snapshots:" in detail.message
+    assert "| snapshot_20260428_001 | 2026-04-28 | 2026-04-28T16:00:00+00:00 | daily     | test           |" in detail.message
 
 
 def test_promote_tushare_daily_prices_raw(tmp_path: Path) -> None:
