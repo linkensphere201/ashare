@@ -226,10 +226,10 @@ Use a small `--limit` first. The command loops through symbols, calls Tushare `c
 For larger pulls, use the resumable run command. It stores symbol-batch tasks in `metadata.sqlite.provider_run_tasks` and continues unfinished tasks when run again with the same `--run-id`:
 
 ```powershell
-stock-picker provider run-cyq-perf-batches --config config/storage.yaml --run-id cyq_20260428 --start-date 2026-04-26 --end-date 2026-04-28 --as-of-date 2026-04-28 --batch-size 100 --max-batches 1 --delay-seconds 0.35 --retry 3 --retry-wait-seconds 60 --backoff-multiplier 2 --progress-every-batches 1
+stock-picker provider run-cyq-perf-batches --config config/storage.yaml --run-id cyq_20260428 --start-date 2026-04-26 --end-date 2026-04-28 --as-of-date 2026-04-28 --batch-size 100 --max-batches 1 --requests-per-minute 180 --retry 3 --retry-wait-seconds 60 --backoff-multiplier 2 --progress-every-batches 1
 ```
 
-Run the same command again to continue the next task. Increase `--max-batches` only after confirming provider rate limits are safe. `cyq_perf` has shown a 200 requests/minute provider limit in real runs, so keep `--delay-seconds` below that limit and use retry/backoff for transient rate-limit responses. Retry/backoff is only applied to normalized retryable provider errors such as rate limits; non-retryable provider errors fail the task and stop the run. When a requested symbol returns no `cyq_perf` rows, the raw batch keeps an audit placeholder row with `provider_status=not_found` and `winner_rate=null`; promotion maps it to `capital_flow_or_chip.close_profit_ratio=null` with `data_method=tushare_cyq_perf:not_found`. Progress is emitted through Python standard logging on stdout; tune it with `--progress-every-batches`, or set it to `0` to disable progress lines.
+Run the same command again to continue the next task. Increase `--max-batches` only after confirming provider rate limits are safe. `cyq_perf` has shown a 200 requests/minute provider limit in real runs, so keep `--requests-per-minute` below that limit and use retry/backoff for transient rate-limit responses. Retry/backoff is only applied to normalized retryable provider errors such as rate limits; non-retryable provider errors fail the task and stop the run. When a requested symbol returns no `cyq_perf` rows, the raw batch keeps an audit placeholder row with `provider_status=not_found` and `winner_rate=null`; promotion maps it to `capital_flow_or_chip.close_profit_ratio=null` with `data_method=tushare_cyq_perf:not_found`. Progress is emitted through Python standard logging on stdout; tune it with `--progress-every-batches`, or set it to `0` to disable progress lines.
 
 Promote raw batches into curated current Parquet:
 
@@ -333,6 +333,7 @@ stock-picker storage check-quality --config config/storage.yaml --dataset daily_
 | `stock-picker provider fetch-cyq-perf-batch` | Fetch Tushare `cyq_perf` for multiple symbols into one raw batch |
 | `stock-picker provider run-cyq-perf-batches` | Resume multi-task `cyq_perf` provider runs from `provider_run_tasks` |
 | `stock-picker provider run-market-daily` | Resume full-market `daily_prices` / `moneyflow_dc` pulls by trading-date tasks |
+| `stock-picker provider sync-latest` | Find missing curated trading dates and fetch/promote data through the latest provider trading day |
 
 Supported probe APIs:
 
@@ -347,6 +348,24 @@ security_master, trading_calendar, daily_prices, moneyflow_dc, cyq_perf
 ```
 
 Provider commands read `TUSHARE_TOKEN` from the environment and never print the token.
+
+Check the latest provider trading day and show which standard-layer dates are missing without writing data:
+
+```powershell
+stock-picker provider sync-latest --config config/storage.yaml --dry-run
+```
+
+Fetch missing data through the latest provider trading day, promote successful raw batches into curated current, run quality checks, and optionally create a snapshot:
+
+```powershell
+stock-picker provider sync-latest --config config/storage.yaml --create-snapshot
+```
+
+By default this checks the current Strategy Candidate 001 v2 data needs: `daily_prices`, `moneyflow_dc`, and `cyq_perf`. Repeat `--dataset` to sync only selected datasets:
+
+```powershell
+stock-picker provider sync-latest --config config/storage.yaml --dataset daily_prices --dataset moneyflow_dc
+```
 
 ### Strategy
 

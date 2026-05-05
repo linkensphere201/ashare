@@ -22,6 +22,7 @@ from stock_picker.provider_run_engine import (
     ProviderTaskError,
     ProviderTaskSpec,
     TaskExecutionResult,
+    RateLimiter,
     classify_tushare_error,
     execute_provider_run,
 )
@@ -112,7 +113,7 @@ def fetch_cyq_perf_batch(
     symbols: list[str] | None = None,
     limit: int | None = None,
     offset: int = 0,
-    delay_seconds: float = 0.0,
+    requests_per_minute: float = 180.0,
     retry: int = 3,
     retry_wait_seconds: float = 60.0,
     backoff_multiplier: float = 2.0,
@@ -124,8 +125,8 @@ def fetch_cyq_perf_batch(
         return ProviderFetchResult(False, "cyq_perf batch fetch requires a positive --limit")
     if offset < 0:
         return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --offset")
-    if delay_seconds < 0:
-        return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --delay-seconds")
+    if requests_per_minute < 0:
+        return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --requests-per-minute")
     if retry < 0:
         return ProviderFetchResult(False, "cyq_perf batch fetch requires a non-negative --retry")
     if retry_wait_seconds < 0:
@@ -157,7 +158,9 @@ def fetch_cyq_perf_batch(
         return ProviderFetchResult(False, "missing dependency: install tushare to fetch provider data")
 
     pro = ts.pro_api(token)
+    limiter = RateLimiter(requests_per_minute)
     for index, symbol in enumerate(selected_symbols):
+        limiter.wait()
         frame, error = _fetch_tushare_cyq_perf_for_symbol_with_retry(
             pro=pro,
             symbol=symbol,
@@ -171,8 +174,6 @@ def fetch_cyq_perf_batch(
             failures.append(f"{symbol}: {error}")
         elif frame is not None and not frame.is_empty():
             frames.append(frame)
-        if delay_seconds and index < len(selected_symbols) - 1:
-            time.sleep(delay_seconds)
 
     if not frames:
         failure_note = "; ".join(failures[:5])
@@ -208,7 +209,7 @@ def run_cyq_perf_batches(
     as_of_date: str | None = None,
     batch_size: int = 100,
     max_batches: int = 1,
-    delay_seconds: float = 0.0,
+    requests_per_minute: float = 180.0,
     token_env: str = "TUSHARE_TOKEN",
     progress_every_batches: int = 0,
     progress_callback: Callable[[str], None] | None = None,
@@ -222,8 +223,8 @@ def run_cyq_perf_batches(
         return ProviderFetchResult(False, "cyq_perf run requires a positive --batch-size")
     if max_batches <= 0:
         return ProviderFetchResult(False, "cyq_perf run requires a positive --max-batches")
-    if delay_seconds < 0:
-        return ProviderFetchResult(False, "cyq_perf run requires a non-negative --delay-seconds")
+    if requests_per_minute < 0:
+        return ProviderFetchResult(False, "cyq_perf run requires a non-negative --requests-per-minute")
     if progress_every_batches < 0:
         return ProviderFetchResult(False, "cyq_perf run requires a non-negative --progress-every-batches")
     if retry < 0:
@@ -267,7 +268,7 @@ def run_cyq_perf_batches(
         token=token,
         symbols=all_symbols,
         batch_size=batch_size,
-        delay_seconds=delay_seconds,
+        requests_per_minute=requests_per_minute,
         as_of_date=run_spec.as_of_date,
     )
     result = execute_provider_run(
@@ -467,7 +468,7 @@ class CyqPerfTaskAdapter:
         token: str,
         symbols: list[str],
         batch_size: int,
-        delay_seconds: float,
+        requests_per_minute: float,
         as_of_date: str,
     ) -> None:
         self.config_path = config_path
@@ -475,7 +476,7 @@ class CyqPerfTaskAdapter:
         self.token = token
         self.symbols = symbols
         self.batch_size = batch_size
-        self.delay_seconds = delay_seconds
+        self.requests_per_minute = requests_per_minute
         self.as_of_date = as_of_date
 
     def plan_tasks(self, run_spec: ProviderRunSpec) -> list[ProviderTaskSpec]:
@@ -512,8 +513,10 @@ class CyqPerfTaskAdapter:
         selected_symbols = self.symbols[start:end]
         frames: list[pl.DataFrame] = []
         pro = ts.pro_api(self.token)
+        limiter = RateLimiter(self.requests_per_minute)
         for index, symbol in enumerate(selected_symbols):
             try:
+                limiter.wait()
                 frame = _fetch_tushare_cyq_perf_for_symbol(
                     pro,
                     symbol,
@@ -529,8 +532,6 @@ class CyqPerfTaskAdapter:
                     end_date=str(task["end_date"] or "") or None,
                 )
             frames.append(frame)
-            if self.delay_seconds and index < len(selected_symbols) - 1:
-                time.sleep(self.delay_seconds)
 
         combined = pl.concat(frames, how="diagonal_relaxed")
         result = write_raw_batch(

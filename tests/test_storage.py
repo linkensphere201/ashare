@@ -10,11 +10,13 @@ from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.factor_research import research_candidate_001
 import stock_picker.provider as provider_module
 from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily, write_raw_batch
+from stock_picker.provider_run_engine import RateLimiter
 from stock_picker.quality import check_curated_quality
 from stock_picker.reports import show_report
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
 from stock_picker.strategy import backtest_candidate_001, rank_candidate_001
+from stock_picker.sync import sync_latest
 
 
 def test_storage_init_and_validate(tmp_path: Path) -> None:
@@ -45,6 +47,36 @@ def test_storage_init_and_validate(tmp_path: Path) -> None:
         "curated_versions",
         "snapshot_manifests",
     }.issubset(table_names)
+
+
+def test_rate_limiter_waits_between_requests() -> None:
+    now = {"value": 0.0}
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now["value"]
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        now["value"] += seconds
+
+    limiter = RateLimiter(120, clock=clock, sleeper=sleeper)
+
+    limiter.wait()
+    now["value"] += 0.1
+    limiter.wait()
+
+    assert sleeps == [0.4]
+
+
+def test_rate_limiter_can_be_disabled() -> None:
+    sleeps: list[float] = []
+    limiter = RateLimiter(0, clock=lambda: 0.0, sleeper=sleeps.append)
+
+    limiter.wait()
+    limiter.wait()
+
+    assert sleeps == []
 
 
 def test_register_schemas_is_idempotent(tmp_path: Path) -> None:
@@ -632,6 +664,95 @@ def test_promote_raw_run_merges_all_successful_task_batches(tmp_path: Path) -> N
     ]
 
 
+def test_promote_current_deactivates_previous_current_version(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    _write_daily_prices_schema(
+        tmp_path,
+        extra_fields=[
+            ("asset_type", "string", False),
+            ("open", "double", True),
+            ("high", "double", True),
+            ("low", "double", True),
+            ("close", "double", True),
+            ("pre_close", "double", True),
+            ("volume", "double", True),
+            ("amount", "double", True),
+            ("pct_change", "double", True),
+            ("trade_year", "integer", False),
+            ("trade_month", "integer", False),
+            ("source", "string", False),
+            ("source_batch_id", "string", False),
+            ("data_version", "string", False),
+            ("created_at", "datetime", False),
+        ],
+    )
+    assert init_storage(config_path).ok
+    assert register_schemas(config_path).ok
+
+    write_raw_batch(
+        config_path,
+        "tushare",
+        "daily_prices",
+        pl.DataFrame(
+            {
+                "ts_code": ["600519.SH"],
+                "trade_date": ["20260427"],
+                "open": [10.0],
+                "high": [11.0],
+                "low": [9.0],
+                "close": [10.5],
+                "pre_close": [10.0],
+                "vol": [100.0],
+                "amount": [1000.0],
+                "pct_chg": [5.0],
+            }
+        ),
+        "2026-04-27",
+    )
+    write_raw_batch(
+        config_path,
+        "tushare",
+        "daily_prices",
+        pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20260428"],
+                "open": [20.0],
+                "high": [21.0],
+                "low": [19.0],
+                "close": [20.5],
+                "pre_close": [20.0],
+                "vol": [200.0],
+                "amount": [2000.0],
+                "pct_chg": [2.5],
+            }
+        ),
+        "2026-04-28",
+    )
+
+    first = promote_raw_batch(config_path, "tushare", "daily_prices", "2026-04-27")
+    second = promote_raw_batch(config_path, "tushare", "daily_prices", "2026-04-28")
+
+    assert first.ok
+    assert second.ok
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        versions = connection.execute(
+            """
+            SELECT curated_version_id, status, row_count
+            FROM curated_versions
+            WHERE dataset_id = 'daily_prices' AND version_type = 'current'
+            ORDER BY curated_version_id
+            """
+        ).fetchall()
+
+    assert versions == [
+        ("daily_prices_current_20260427", "inactive", 1),
+        ("daily_prices_current_20260428", "active", 2),
+    ]
+    assert check_curated_quality(config_path, ["daily_prices"]).ok
+
+
 def test_promote_tushare_security_master_adds_market_fields(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     _write_security_master_schema(tmp_path)
@@ -1127,6 +1248,7 @@ def test_fetch_cyq_perf_batch_writes_combined_raw_batch(tmp_path: Path, monkeypa
         end_date="2026-04-28",
         as_of_date="2026-04-28",
         limit=2,
+        requests_per_minute=0,
     )
 
     assert result.ok
@@ -1180,6 +1302,7 @@ def test_run_cyq_perf_batches_resumes_from_saved_offset(tmp_path: Path, monkeypa
         as_of_date="2026-04-28",
         batch_size=2,
         max_batches=1,
+        requests_per_minute=0,
     )
     second = run_cyq_perf_batches(
         config_path=config_path,
@@ -1189,6 +1312,7 @@ def test_run_cyq_perf_batches_resumes_from_saved_offset(tmp_path: Path, monkeypa
         as_of_date="2026-04-28",
         batch_size=2,
         max_batches=1,
+        requests_per_minute=0,
     )
 
     assert first.ok
@@ -1273,6 +1397,7 @@ def test_run_cyq_perf_batches_reports_progress(tmp_path: Path, monkeypatch) -> N
         max_batches=2,
         progress_every_batches=1,
         progress_callback=progress_messages.append,
+        requests_per_minute=0,
     )
 
     assert result.ok
@@ -1332,6 +1457,7 @@ def test_run_cyq_perf_batches_retries_rate_limit_error(tmp_path: Path, monkeypat
         as_of_date="2026-04-28",
         batch_size=2,
         max_batches=1,
+        requests_per_minute=0,
         retry=1,
         retry_wait_seconds=0,
     )
@@ -1404,6 +1530,7 @@ def test_run_cyq_perf_batches_writes_not_found_placeholder_for_empty_result(tmp_
         as_of_date="2026-04-28",
         batch_size=3,
         max_batches=1,
+        requests_per_minute=0,
     )
 
     assert result.ok
@@ -1474,6 +1601,7 @@ def test_provider_run_resume_marks_failed_run_running_before_continuing(tmp_path
         as_of_date="2026-04-28",
         batch_size=2,
         max_batches=1,
+        requests_per_minute=0,
     )
     assert not first.ok
     fail_first = False
@@ -1485,6 +1613,7 @@ def test_provider_run_resume_marks_failed_run_running_before_continuing(tmp_path
         as_of_date="2026-04-28",
         batch_size=2,
         max_batches=1,
+        requests_per_minute=0,
     )
 
     assert second.ok
@@ -1504,6 +1633,83 @@ def test_provider_run_resume_marks_failed_run_running_before_continuing(tmp_path
         ).fetchall()
     assert run_status == ("running",)
     assert tasks == [(0, 2, "success", 1, None), (2, 3, "pending", 0, None)]
+
+
+def test_provider_run_resume_resets_stale_running_task(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_security_master_current(tmp_path, ["000001.SZ", "000002.SZ"])
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO provider_runs (
+              run_id, source, dataset_name, start_date, end_date, as_of_date, status,
+              total_symbols, next_offset, batch_size, requested_symbols, symbols_with_rows,
+              failed_symbols, row_count, raw_batch_ids, failure_json, created_at, updated_at, notes
+            )
+            VALUES ('cyq_stale_running_test', 'tushare', 'cyq_perf', '2026-04-26', '2026-04-28', '2026-04-28',
+                    'running', 1, 0, 0, 0, 0, 0, 0, '[]', '[]', '2026-04-28T00:00:00+00:00',
+                    '2026-04-28T00:00:00+00:00', 'test')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO provider_run_tasks (
+              task_id, run_id, source, dataset_name, task_type, trade_date,
+              symbol_start_offset, symbol_end_offset, start_date, end_date, payload_json,
+              status, attempts, raw_batch_id, row_count, created_at, updated_at, notes
+            )
+            VALUES ('cyq_stale_running_test:cyq_perf:20260428:0-2', 'cyq_stale_running_test', 'tushare',
+                    'cyq_perf', 'cyq_perf_symbol_batch', NULL, 0, 2, '2026-04-26', '2026-04-28',
+                    '{}', 'running', 0, NULL, 0, '2026-04-28T00:00:00+00:00',
+                    '2026-04-28T00:00:00+00:00', 'stale')
+            """
+        )
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, ts_code, start_date=None, end_date=None):
+            return pl.DataFrame(
+                {
+                    "ts_code": [ts_code],
+                    "trade_date": [end_date],
+                    "winner_rate": [80.0],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = run_cyq_perf_batches(
+        config_path=config_path,
+        run_id="cyq_stale_running_test",
+        start_date="2026-04-26",
+        end_date="2026-04-28",
+        as_of_date="2026-04-28",
+        batch_size=2,
+        max_batches=1,
+        requests_per_minute=0,
+    )
+
+    assert result.ok
+    assert "status=completed" in result.message
+    with sqlite3.connect(sqlite_path) as connection:
+        task = connection.execute(
+            """
+            SELECT status, attempts, row_count, raw_batch_id
+            FROM provider_run_tasks
+            WHERE task_id = 'cyq_stale_running_test:cyq_perf:20260428:0-2'
+            """
+        ).fetchone()
+    assert task == ("success", 1, 2, "tushare_cyq_perf_20260428_001")
 
 
 def test_run_cyq_perf_batches_stops_non_retryable_failure_without_partial_raw(tmp_path: Path, monkeypatch) -> None:
@@ -1549,6 +1755,7 @@ def test_run_cyq_perf_batches_stops_non_retryable_failure_without_partial_raw(tm
         as_of_date="2026-04-28",
         batch_size=2,
         max_batches=2,
+        requests_per_minute=0,
         retry=1,
         retry_wait_seconds=0,
     )
@@ -1848,6 +2055,60 @@ def test_run_market_daily_reports_progress(tmp_path: Path, monkeypatch) -> None:
     assert "recent_raw_batches=tushare_daily_prices_20260428_001, tushare_daily_prices_20260428_002" in result.message
 
 
+def test_sync_latest_dry_run_reports_missing_dates(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_trading_calendar_current(tmp_path)
+    _write_daily_prices_current(tmp_path, [date(2026, 4, 28)])
+    _write_capital_flow_current(
+        tmp_path,
+        [
+            {
+                "symbol": "600519.SH",
+                "trade_date": date(2026, 4, 28),
+                "main_net_inflow_rate": 1.0,
+                "close_profit_ratio": 90.0,
+                "data_method": "tushare_cyq_perf",
+            }
+        ],
+    )
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def trade_cal(self, exchange=None, start_date=None, end_date=None):
+            return pl.DataFrame(
+                {
+                    "exchange": ["SSE", "SSE", "SSE"],
+                    "cal_date": ["20260429", "20260430", "20260501"],
+                    "is_open": [1, 1, 0],
+                    "pretrade_date": ["20260428", "20260429", "20260430"],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    result = sync_latest(
+        config_path=config_path,
+        end_date="2026-05-01",
+        dry_run=True,
+    )
+
+    assert result.ok
+    assert "latest_trade_date: 2026-04-30" in result.message
+    assert "- daily_prices: 2 [2026-04-29, 2026-04-30]" in result.message
+    assert "- moneyflow_dc: 2 [2026-04-29, 2026-04-30]" in result.message
+    assert "- cyq_perf: 2 [2026-04-29, 2026-04-30]" in result.message
+    assert "dry_run: no data fetched or promoted" in result.message
+
+
 def test_probe_provider_requires_tushare_token(monkeypatch) -> None:
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
 
@@ -2021,6 +2282,46 @@ def _write_security_master_current(tmp_path: Path, symbols: list[str]) -> None:
             "status": ["active"] * len(symbols),
         }
     ).write_parquet(security_path)
+
+
+def _write_daily_prices_current(tmp_path: Path, trade_dates: list[date]) -> None:
+    daily_path = tmp_path / "data" / "curated" / "current" / "daily_prices" / "part-000.parquet"
+    daily_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"] * len(trade_dates),
+            "trade_date": trade_dates,
+            "asset_type": ["stock"] * len(trade_dates),
+            "close": [10.0] * len(trade_dates),
+            "trade_year": [value.year for value in trade_dates],
+            "trade_month": [value.month for value in trade_dates],
+            "source": ["tushare"] * len(trade_dates),
+            "source_batch_id": ["test_batch"] * len(trade_dates),
+            "data_version": ["2026-04-28"] * len(trade_dates),
+            "created_at": ["2026-04-28T00:00:00+00:00"] * len(trade_dates),
+        }
+    ).write_parquet(daily_path)
+
+
+def _write_capital_flow_current(tmp_path: Path, rows: list[dict[str, object]]) -> None:
+    flow_path = tmp_path / "data" / "curated" / "current" / "capital_flow_or_chip" / "part-000.parquet"
+    flow_path.parent.mkdir(parents=True, exist_ok=True)
+    trade_dates = [row["trade_date"] for row in rows]
+    pl.DataFrame(
+        {
+            "symbol": [row["symbol"] for row in rows],
+            "trade_date": trade_dates,
+            "main_net_inflow_rate": [row.get("main_net_inflow_rate") for row in rows],
+            "close_profit_ratio": [row.get("close_profit_ratio") for row in rows],
+            "data_method": [row.get("data_method") for row in rows],
+            "trade_year": [value.year for value in trade_dates],
+            "trade_month": [value.month for value in trade_dates],
+            "source": ["tushare"] * len(rows),
+            "source_batch_id": ["test_batch"] * len(rows),
+            "data_version": ["2026-04-28"] * len(rows),
+            "created_at": ["2026-04-28T00:00:00+00:00"] * len(rows),
+        }
+    ).write_parquet(flow_path)
 
 
 def _write_storage_config(tmp_path: Path) -> Path:

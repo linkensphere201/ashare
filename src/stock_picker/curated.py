@@ -72,6 +72,7 @@ def import_curated_csv(
     checksum = _sha256_file(output_path)
     curated_version_id = f"{dataset_id}_current_{data_version.replace('-', '')}"
     with sqlite3.connect(config.metadata_sqlite_path) as connection:
+        _deactivate_previous_current_versions(connection, dataset_id, curated_version_id)
         connection.execute(
             """
             INSERT INTO data_batches (
@@ -389,6 +390,7 @@ def _write_curated_current(
     data_version = as_of_date or created_at[:10]
     curated_version_id = f"{dataset_id}_current_{data_version.replace('-', '')}"
     with sqlite3.connect(config.metadata_sqlite_path) as connection:
+        _deactivate_previous_current_versions(connection, dataset_id, curated_version_id)
         connection.execute(
             """
             INSERT INTO curated_versions (
@@ -437,6 +439,24 @@ def _write_curated_current(
         f"promoted {row_count} rows into curated current: {dataset_id}",
         output_path,
         row_count,
+    )
+
+
+def _deactivate_previous_current_versions(
+    connection: sqlite3.Connection,
+    dataset_id: str,
+    curated_version_id: str,
+) -> None:
+    connection.execute(
+        """
+        UPDATE curated_versions
+        SET status = 'inactive'
+        WHERE dataset_id = ?
+          AND version_type = 'current'
+          AND status = 'active'
+          AND curated_version_id <> ?
+        """,
+        (dataset_id, curated_version_id),
     )
 
 

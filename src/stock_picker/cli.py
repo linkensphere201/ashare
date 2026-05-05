@@ -16,6 +16,7 @@ from stock_picker.reports import show_report
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
 from stock_picker.strategy import backtest_candidate_001, rank_candidate_001
+from stock_picker.sync import sync_latest
 
 
 LOGGER_NAME = "stock_picker"
@@ -101,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_cyq_batch_cmd.add_argument("--as-of-date", help="Business as-of date for the raw batch")
     fetch_cyq_batch_cmd.add_argument("--limit", type=int, help="Maximum symbols to fetch")
     fetch_cyq_batch_cmd.add_argument("--offset", type=int, default=0, help="Number of symbols to skip")
-    fetch_cyq_batch_cmd.add_argument("--delay-seconds", type=float, default=0.0, help="Sleep between symbol requests")
+    fetch_cyq_batch_cmd.add_argument("--requests-per-minute", type=float, default=180.0, help="cyq_perf provider request rate limit")
     fetch_cyq_batch_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
     fetch_cyq_batch_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
@@ -116,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_cyq_cmd.add_argument("--as-of-date", help="Business as-of date for raw batches")
     run_cyq_cmd.add_argument("--batch-size", type=int, default=100, help="Symbols per raw batch")
     run_cyq_cmd.add_argument("--max-batches", type=int, default=1, help="Maximum batches to run in this invocation")
-    run_cyq_cmd.add_argument("--delay-seconds", type=float, default=0.0, help="Sleep between symbol requests")
+    run_cyq_cmd.add_argument("--requests-per-minute", type=float, default=180.0, help="cyq_perf provider request rate limit")
     run_cyq_cmd.add_argument("--retry", type=int, default=3, help="Retries per symbol after the first attempt")
     run_cyq_cmd.add_argument("--retry-wait-seconds", type=float, default=60.0, help="Initial retry wait for symbol fetch failures")
     run_cyq_cmd.add_argument("--backoff-multiplier", type=float, default=2.0, help="Retry wait multiplier")
@@ -166,6 +167,50 @@ def build_parser() -> argparse.ArgumentParser:
     probe_cmd.add_argument("--start-date", help="Start date, such as 2026-01-01")
     probe_cmd.add_argument("--end-date", help="End date, such as 2026-04-28")
     probe_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
+
+    sync_latest_cmd = provider_subparsers.add_parser(
+        "sync-latest",
+        help="Find missing curated trading dates and fetch data through the latest provider trading day",
+    )
+    sync_latest_cmd.add_argument("--source", default="tushare", help="Provider source, currently tushare")
+    sync_latest_cmd.add_argument(
+        "--dataset",
+        action="append",
+        help="Dataset to sync; repeat for multiple datasets. Defaults to daily_prices, moneyflow_dc, and cyq_perf.",
+    )
+    sync_latest_cmd.add_argument("--start-date", help="Optional inclusive first trading date to inspect")
+    sync_latest_cmd.add_argument("--end-date", help="Calendar end date for latest trading-day lookup; defaults to today")
+    sync_latest_cmd.add_argument("--calendar-lookback-days", type=int, default=45, help="Calendar lookup fallback window")
+    sync_latest_cmd.add_argument("--dry-run", action="store_true", help="Only display missing dates without fetching")
+    sync_latest_cmd.add_argument("--run-id-prefix", default="sync_latest", help="Provider run id prefix")
+    sync_latest_cmd.add_argument("--max-market-tasks", type=int, default=1000, help="Maximum market daily tasks to execute")
+    sync_latest_cmd.add_argument("--requests-per-minute", type=float, default=40.0, help="Provider request rate limit")
+    sync_latest_cmd.add_argument("--symbol-batch-size", type=int, default=1000, help="Symbols per moneyflow_dc task")
+    sync_latest_cmd.add_argument("--max-cyq-batches", type=int, default=100000, help="Maximum cyq_perf symbol batches to execute")
+    sync_latest_cmd.add_argument("--cyq-batch-size", type=int, default=100, help="Symbols per cyq_perf task")
+    sync_latest_cmd.add_argument("--cyq-requests-per-minute", type=float, default=180.0, help="cyq_perf provider request rate limit")
+    sync_latest_cmd.add_argument("--retry", type=int, default=3, help="Retries per task after the first attempt")
+    sync_latest_cmd.add_argument("--retry-wait-seconds", type=float, default=60.0, help="Initial retry wait")
+    sync_latest_cmd.add_argument("--backoff-multiplier", type=float, default=2.0, help="Retry wait multiplier")
+    sync_latest_cmd.add_argument(
+        "--create-snapshot",
+        action="store_true",
+        help="Create a snapshot after successful promotion and quality checks",
+    )
+    sync_latest_cmd.add_argument(
+        "--progress-every-tasks",
+        type=int,
+        default=50,
+        help="Print market daily progress after every N tasks; use 0 to disable",
+    )
+    sync_latest_cmd.add_argument(
+        "--progress-every-batches",
+        type=int,
+        default=1,
+        help="Print cyq_perf progress after every N batches; use 0 to disable",
+    )
+    sync_latest_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
+    sync_latest_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     init_cmd = storage_subparsers.add_parser("init", help="Create configured storage directories and metadata tables")
     init_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
@@ -430,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
             symbols=args.symbol,
             limit=args.limit,
             offset=args.offset,
-            delay_seconds=args.delay_seconds,
+            requests_per_minute=args.requests_per_minute,
             token_env=args.token_env,
         )
         if result.ok:
@@ -450,7 +495,7 @@ def main(argv: list[str] | None = None) -> int:
             as_of_date=args.as_of_date,
             batch_size=args.batch_size,
             max_batches=args.max_batches,
-            delay_seconds=args.delay_seconds,
+            requests_per_minute=args.requests_per_minute,
             token_env=args.token_env,
             progress_every_batches=args.progress_every_batches,
             progress_callback=progress_logger.info,
@@ -499,6 +544,38 @@ def main(argv: list[str] | None = None) -> int:
             start_date=args.start_date,
             end_date=args.end_date,
             token_env=args.token_env,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "provider" and args.provider_command == "sync-latest":
+        progress_logger = _configure_progress_logger()
+        result = sync_latest(
+            config_path=Path(args.config),
+            source=args.source,
+            datasets=args.dataset,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            calendar_lookback_days=args.calendar_lookback_days,
+            dry_run=args.dry_run,
+            run_id_prefix=args.run_id_prefix,
+            max_market_tasks=args.max_market_tasks,
+            requests_per_minute=args.requests_per_minute,
+            symbol_batch_size=args.symbol_batch_size,
+            max_cyq_batches=args.max_cyq_batches,
+            cyq_batch_size=args.cyq_batch_size,
+            cyq_requests_per_minute=args.cyq_requests_per_minute,
+            retry=args.retry,
+            retry_wait_seconds=args.retry_wait_seconds,
+            backoff_multiplier=args.backoff_multiplier,
+            create_snapshot_after=args.create_snapshot,
+            token_env=args.token_env,
+            progress_every_tasks=args.progress_every_tasks,
+            progress_every_batches=args.progress_every_batches,
+            progress_callback=progress_logger.info,
         )
         if result.ok:
             print(result.message)

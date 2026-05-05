@@ -90,6 +90,28 @@ class ProviderTaskAdapter(Protocol):
         ...
 
 
+class RateLimiter:
+    def __init__(self, requests_per_minute: float, clock: Callable[[], float] = time.monotonic, sleeper: Callable[[float], None] = time.sleep) -> None:
+        if requests_per_minute < 0:
+            raise ValueError("requests_per_minute must be non-negative")
+        self.requests_per_minute = requests_per_minute
+        self._clock = clock
+        self._sleeper = sleeper
+        self._last_request_at: float | None = None
+
+    def wait(self) -> None:
+        if self.requests_per_minute <= 0:
+            self._last_request_at = self._clock()
+            return
+        interval = 60.0 / self.requests_per_minute
+        now = self._clock()
+        if self._last_request_at is not None:
+            elapsed = now - self._last_request_at
+            if elapsed < interval:
+                self._sleeper(interval - elapsed)
+        self._last_request_at = self._clock()
+
+
 def execute_provider_run(
     sqlite_path: Path,
     run_spec: ProviderRunSpec,
@@ -117,7 +139,7 @@ def execute_provider_run(
     completed = 0
     last_result: TaskExecutionResult | None = None
     last_task: dict[str, object] | None = None
-    last_request_at: float | None = None
+    task_limiter = RateLimiter(run_spec.requests_per_minute)
     started_at = time.monotonic()
 
     for _ in range(run_spec.max_tasks):
@@ -126,12 +148,12 @@ def execute_provider_run(
             _mark_run_completed(sqlite_path, run_spec.run_id)
             break
         last_task = task
-        result, last_request_at = _execute_task_with_retry(
+        result = _execute_task_with_retry(
             sqlite_path=sqlite_path,
             run_spec=run_spec,
             adapter=adapter,
             task=task,
-            last_request_at=last_request_at,
+            task_limiter=task_limiter,
         )
         if not result.ok:
             stats = _run_stats(sqlite_path, run_spec.run_id)
@@ -208,24 +230,24 @@ def _execute_task_with_retry(
     run_spec: ProviderRunSpec,
     adapter: ProviderTaskAdapter,
     task: dict[str, object],
-    last_request_at: float | None,
-) -> tuple[TaskExecutionResult, float | None]:
+    task_limiter: RateLimiter,
+) -> TaskExecutionResult:
     max_attempts = run_spec.retry + 1
     for attempt in range(1, max_attempts + 1):
         _mark_task_running(sqlite_path, str(task["task_id"]))
-        last_request_at = _throttle(run_spec.requests_per_minute, last_request_at)
+        task_limiter.wait()
         result = adapter.execute_task(task)
         if result.ok:
             _mark_task_success(sqlite_path, str(task["task_id"]), attempt, str(result.raw_batch_id), result.row_count)
-            return result, last_request_at
+            return result
         error = result.error or ProviderTaskError(ProviderErrorReason.UNKNOWN, "provider task failed", retryable=False)
         if not error.retryable or attempt >= max_attempts:
             _mark_task_failed(sqlite_path, str(task["task_id"]), attempt, error)
-            return result, last_request_at
+            return result
         wait_seconds = run_spec.retry_wait_seconds * (run_spec.backoff_multiplier ** (attempt - 1))
         time.sleep(wait_seconds)
     error = ProviderTaskError(ProviderErrorReason.UNKNOWN, "provider task failed unexpectedly")
-    return TaskExecutionResult(False, error=error), last_request_at
+    return TaskExecutionResult(False, error=error)
 
 
 def _ensure_run(sqlite_path: Path, run_spec: ProviderRunSpec, total_tasks: int) -> None:
@@ -264,6 +286,16 @@ def _resume_run_if_unfinished(sqlite_path: Path, run_id: str) -> None:
         return
     now = datetime.now(UTC).isoformat(timespec="seconds")
     with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            UPDATE provider_run_tasks
+            SET status = 'pending',
+                updated_at = ?,
+                notes = 'reset stale running task on resume'
+            WHERE run_id = ? AND status = 'running'
+            """,
+            (now, run_id),
+        )
         connection.execute(
             """
             UPDATE provider_runs
@@ -545,14 +577,3 @@ def _progress_message(
         f"rate={rate:.1f}_tasks_per_min"
     )
 
-
-def _throttle(requests_per_minute: float, last_request_at: float | None) -> float:
-    if requests_per_minute <= 0:
-        return time.monotonic()
-    interval = 60.0 / requests_per_minute
-    now = time.monotonic()
-    if last_request_at is not None:
-        elapsed = now - last_request_at
-        if elapsed < interval:
-            time.sleep(interval - elapsed)
-    return time.monotonic()
