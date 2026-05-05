@@ -49,6 +49,11 @@ TUSHARE_SUPPORTED_DATASETS = {
     "security_master",
     "trading_calendar",
     "daily_prices",
+    "adj_factor",
+    "index_daily",
+    "daily_basic",
+    "stk_limit",
+    "suspend_d",
     "moneyflow_dc",
     "cyq_perf",
 }
@@ -60,6 +65,11 @@ TUSHARE_EXPECTED_FIELDS = {
     "stock_basic": {"ts_code", "symbol", "name", "market", "list_date"},
     "trade_cal": {"exchange", "cal_date", "is_open"},
     "daily": {"ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"},
+    "adj_factor": {"ts_code", "trade_date", "adj_factor"},
+    "index_daily": {"ts_code", "trade_date", "open", "high", "low", "close"},
+    "daily_basic": {"ts_code", "trade_date", "turnover_rate"},
+    "stk_limit": {"ts_code", "trade_date", "up_limit", "down_limit"},
+    "suspend_d": {"ts_code", "trade_date", "suspend_type"},
     "moneyflow_dc": {"ts_code", "trade_date", "net_amount", "net_amount_rate"},
     "moneyflow_ths": {"ts_code", "trade_date", "net_d5_amount"},
     "cyq_perf": {"ts_code", "trade_date", "winner_rate"},
@@ -730,6 +740,41 @@ def _fetch_tushare_dataset(
             start_date=_compact_date(start_date),
             end_date=_compact_date(end_date),
         )
+    elif dataset == "adj_factor":
+        pandas_frame = pro.adj_factor(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif dataset == "index_daily":
+        pandas_frame = pro.index_daily(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif dataset == "daily_basic":
+        pandas_frame = pro.daily_basic(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif dataset == "stk_limit":
+        pandas_frame = pro.stk_limit(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif dataset == "suspend_d":
+        pandas_frame = pro.suspend_d(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
     elif dataset == "moneyflow_dc":
         pandas_frame = pro.moneyflow_dc(
             ts_code=ts_code,
@@ -1286,6 +1331,41 @@ def _probe_tushare_api(
         )
     elif api == "daily":
         pandas_frame = pro.daily(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif api == "adj_factor":
+        pandas_frame = pro.adj_factor(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif api == "index_daily":
+        pandas_frame = pro.index_daily(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif api == "daily_basic":
+        pandas_frame = pro.daily_basic(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif api == "stk_limit":
+        pandas_frame = pro.stk_limit(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif api == "suspend_d":
+        pandas_frame = pro.suspend_d(
             ts_code=ts_code,
             trade_date=_compact_date(trade_date),
             start_date=_compact_date(start_date),

@@ -178,6 +178,11 @@ Supported first-pass Tushare datasets:
 | `security_master` | `stock_basic` | `security_master` | Symbol identity and active universe |
 | `trading_calendar` | `trade_cal` | `trading_calendar` | Trading-day alignment |
 | `daily_prices` | `daily` | `daily_prices` | Prices, MACD, liquidity, forward returns |
+| `adj_factor` | `adj_factor` | `daily_prices` | Adjustment factor for adjusted returns and technical indicators |
+| `index_daily` | `index_daily` | `daily_prices` | Benchmark index OHLCV rows with `asset_type=index` |
+| `daily_basic` | `daily_basic` | `daily_prices` | Turnover and liquidity fields |
+| `stk_limit` | `stk_limit` | `daily_prices` | Limit-up and limit-down prices |
+| `suspend_d` | `suspend_d` | `daily_prices`, `risk_events` | Suspension flag and suspension risk event |
 | `moneyflow_dc` | `moneyflow_dc` | `capital_flow_or_chip` | Main-fund flow strength |
 | `cyq_perf` | `cyq_perf` | `capital_flow_or_chip` | Winner rate / profit-chip condition |
 
@@ -194,6 +199,11 @@ Fetch raw provider data:
 stock-picker provider fetch --config config/storage.yaml --source tushare --dataset security_master --as-of-date 2026-04-28
 stock-picker provider fetch --config config/storage.yaml --source tushare --dataset trading_calendar --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
 stock-picker provider fetch --config config/storage.yaml --source tushare --dataset daily_prices --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
+stock-picker provider fetch --config config/storage.yaml --source tushare --dataset adj_factor --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
+stock-picker provider fetch --config config/storage.yaml --source tushare --dataset index_daily --ts-code 000852.SH --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
+stock-picker provider fetch --config config/storage.yaml --source tushare --dataset daily_basic --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
+stock-picker provider fetch --config config/storage.yaml --source tushare --dataset stk_limit --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
+stock-picker provider fetch --config config/storage.yaml --source tushare --dataset suspend_d --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
 stock-picker provider fetch --config config/storage.yaml --source tushare --dataset moneyflow_dc --start-date 2025-04-28 --end-date 2026-04-28 --as-of-date 2026-04-28
 ```
 
@@ -237,6 +247,11 @@ Promote raw batches into curated current Parquet:
 stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset security_master --as-of-date 2026-04-28
 stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset trading_calendar --as-of-date 2026-04-28
 stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset daily_prices --as-of-date 2026-04-28
+stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset adj_factor --as-of-date 2026-04-28
+stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset index_daily --as-of-date 2026-04-28
+stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset daily_basic --as-of-date 2026-04-28
+stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset stk_limit --as-of-date 2026-04-28
+stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset suspend_d --as-of-date 2026-04-28
 stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset moneyflow_dc --as-of-date 2026-04-28
 stock-picker storage promote-raw --config config/storage.yaml --source tushare --dataset cyq_perf --as-of-date 2026-04-28
 ```
@@ -276,7 +291,7 @@ stock-picker storage inspect-run --config config/storage.yaml --batch-id tushare
 Strategy Candidate 001 v2 uses:
 
 - `moneyflow_dc.net_amount_rate > 0`
-- MACD golden cross from `daily_prices.close`, EMA 12 / 26 / 9
+- MACD golden cross from adjusted close when `daily_prices.adj_factor` is available, EMA 12 / 26 / 9
 - `cyq_perf.winner_rate > 80`
 - Top 10 candidate output
 - Ranking by `net_amount_rate desc`, then `winner_rate desc`, then `20d_return desc`
@@ -291,8 +306,10 @@ stock-picker strategy rank-candidate-001 --config config/storage.yaml --snapshot
 Run the diagnostic backtest:
 
 ```powershell
-stock-picker strategy backtest-candidate-001 --config config/storage.yaml --snapshot-id snapshot_20260428_001 --holding-days 20 --top 10
+stock-picker strategy backtest-candidate-001 --config config/storage.yaml --snapshot-id snapshot_20260428_001 --holding-days 20 --top 10 --benchmark-symbol 000852.SH
 ```
+
+The backtest reports trade-level metrics plus first-pass portfolio diagnostics, including annualized return, annualized volatility, Sharpe ratio, maximum drawdown, Calmar ratio, benchmark return, excess return, tracking error, information ratio, turnover proxy, holding overlap, and monthly returns.
 
 The output is a research/watchlist result, not direct buy or sell advice.
 
@@ -339,12 +356,13 @@ Supported probe APIs:
 
 ```text
 stock_basic, trade_cal, daily, moneyflow_dc, moneyflow_ths, cyq_perf
+adj_factor, index_daily, daily_basic, stk_limit, suspend_d
 ```
 
 Supported fetch datasets:
 
 ```text
-security_master, trading_calendar, daily_prices, moneyflow_dc, cyq_perf
+security_master, trading_calendar, daily_prices, adj_factor, index_daily, daily_basic, stk_limit, suspend_d, moneyflow_dc, cyq_perf
 ```
 
 Provider commands read `TUSHARE_TOKEN` from the environment and never print the token.

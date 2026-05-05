@@ -74,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_candidate_cmd.add_argument("--snapshot-id", required=True, help="Snapshot id")
     backtest_candidate_cmd.add_argument("--holding-days", type=int, default=20, help="Holding window in trading rows")
     backtest_candidate_cmd.add_argument("--top", type=int, default=10, help="Candidate count per signal date")
+    backtest_candidate_cmd.add_argument("--benchmark-symbol", default="000852.SH", help="Benchmark symbol for relative metrics")
     backtest_candidate_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     fetch_cmd = provider_subparsers.add_parser("fetch", help="Fetch a raw provider dataset into the raw store")
@@ -592,7 +593,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.command == "strategy" and args.strategy_command == "backtest-candidate-001":
-        result = backtest_candidate_001(Path(args.config), args.snapshot_id, args.holding_days, args.top)
+        result = backtest_candidate_001(Path(args.config), args.snapshot_id, args.holding_days, args.top, args.benchmark_symbol)
         if result.ok:
             print(result.message)
             return 0

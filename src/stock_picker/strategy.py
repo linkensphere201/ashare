@@ -84,6 +84,7 @@ def backtest_candidate_001(
     snapshot_id: str,
     holding_days: int = 20,
     top: int = 10,
+    benchmark_symbol: str = "000852.SH",
 ) -> StrategyResult:
     config = load_storage_config(config_path)
     initialize_metadata_catalog(config.metadata_sqlite_path)
@@ -129,8 +130,17 @@ def backtest_candidate_001(
             pl.col("forward_return").mean().alias("avg_forward_return"),
             pl.col("forward_return").median().alias("median_forward_return"),
             (pl.col("forward_return") > 0).mean().alias("win_rate"),
+            pl.col("forward_return").max().alias("best_trade_return"),
+            pl.col("forward_return").min().alias("worst_trade_return"),
+            pl.col("forward_return").std().alias("return_std"),
         ]
     ).row(0, named=True)
+    portfolio_metrics, portfolio_warnings = _candidate_001_portfolio_metrics(
+        daily=daily,
+        backtest_rows=backtest_rows,
+        holding_days=holding_days,
+        benchmark_symbol=benchmark_symbol,
+    )
     display = backtest_rows.select(
         [
             pl.col("trade_date").alias("signal_date"),
@@ -138,8 +148,10 @@ def backtest_candidate_001(
             "symbol",
             "name",
             pl.col("close").alias("signal_close"),
+            "raw_entry_price",
             "entry_price",
             "exit_trade_date",
+            "raw_exit_price",
             "exit_price",
             "forward_return",
             "main_net_inflow_rate",
@@ -160,6 +172,23 @@ def backtest_candidate_001(
                 f"avg_forward_return: {metrics['avg_forward_return']:.6f}",
                 f"median_forward_return: {metrics['median_forward_return']:.6f}",
                 f"win_rate: {metrics['win_rate']:.6f}",
+                f"best_trade_return: {metrics['best_trade_return']:.6f}",
+                f"worst_trade_return: {metrics['worst_trade_return']:.6f}",
+                f"return_std: {_format_optional_float(metrics['return_std'])}",
+                f"annual_return: {_format_optional_float(portfolio_metrics.get('annual_return'))}",
+                f"annual_volatility: {_format_optional_float(portfolio_metrics.get('annual_volatility'))}",
+                f"sharpe_ratio: {_format_optional_float(portfolio_metrics.get('sharpe_ratio'))}",
+                f"max_drawdown: {_format_optional_float(portfolio_metrics.get('max_drawdown'))}",
+                f"calmar_ratio: {_format_optional_float(portfolio_metrics.get('calmar_ratio'))}",
+                f"benchmark_symbol: {benchmark_symbol}",
+                f"benchmark_return: {_format_optional_float(portfolio_metrics.get('benchmark_return'))}",
+                f"excess_return: {_format_optional_float(portfolio_metrics.get('excess_return'))}",
+                f"tracking_error: {_format_optional_float(portfolio_metrics.get('tracking_error'))}",
+                f"information_ratio: {_format_optional_float(portfolio_metrics.get('information_ratio'))}",
+                f"turnover_proxy: {_format_optional_float(portfolio_metrics.get('turnover_proxy'))}",
+                f"holding_overlap: {_format_optional_float(portfolio_metrics.get('holding_overlap'))}",
+                f"monthly_returns: {portfolio_metrics.get('monthly_returns', '{}')}",
+                "warnings: " + ("; ".join(portfolio_warnings) if portfolio_warnings else "none"),
                 "trades:",
                 display.write_csv(),
             ]
@@ -172,7 +201,7 @@ _CANDIDATE_SORT_DESCENDING = [True, True, True]
 
 
 def _candidate_001_frame(daily: pl.DataFrame, capital: pl.DataFrame, security: pl.DataFrame) -> pl.DataFrame:
-    daily_with_factors = _calculate_price_factors(daily)
+    daily_with_factors = _calculate_price_factors(_with_adjusted_prices(daily))
     return (
         daily_with_factors.join(capital, on=["symbol", "trade_date"], how="inner")
         .join(security.select(["symbol", "name", "status"]), on="symbol", how="left")
@@ -206,26 +235,35 @@ def _trade_date_successors(daily: pl.DataFrame, trading_calendar: pl.DataFrame |
 
 
 def _entry_exit_prices(daily: pl.DataFrame, holding_days: int) -> pl.DataFrame:
-    sorted_daily = daily.sort(["symbol", "trade_date"])
-    entry_price_expr = pl.col("close").shift(-1).over("symbol")
-    if "open" in daily.columns:
+    sorted_daily = _with_adjusted_prices(daily).sort(["symbol", "trade_date"])
+    entry_price_expr = pl.col("adj_close").shift(-1).over("symbol")
+    raw_entry_price_expr = pl.col("close").shift(-1).over("symbol")
+    if "open" in sorted_daily.columns:
         entry_price_expr = pl.coalesce(
+            [
+                pl.col("adj_open").shift(-1).over("symbol"),
+                pl.col("adj_close").shift(-1).over("symbol"),
+            ]
+        )
+        raw_entry_price_expr = pl.coalesce(
             [
                 pl.col("open").shift(-1).over("symbol"),
                 pl.col("close").shift(-1).over("symbol"),
             ]
         )
     return (
-        sorted_daily.select(["symbol", "trade_date", "close", *([] if "open" not in daily.columns else ["open"])])
+        sorted_daily.select(["symbol", "trade_date", "close", "adj_close", "adj_open", *([] if "open" not in daily.columns else ["open"])])
         .with_columns(
             [
                 pl.col("trade_date").shift(-1).over("symbol").alias("recommend_trade_date"),
+                raw_entry_price_expr.alias("raw_entry_price"),
                 entry_price_expr.alias("entry_price"),
                 pl.col("trade_date").shift(-(holding_days + 1)).over("symbol").alias("exit_trade_date"),
-                pl.col("close").shift(-(holding_days + 1)).over("symbol").alias("exit_price"),
+                pl.col("close").shift(-(holding_days + 1)).over("symbol").alias("raw_exit_price"),
+                pl.col("adj_close").shift(-(holding_days + 1)).over("symbol").alias("exit_price"),
             ]
         )
-        .select(["symbol", "trade_date", "recommend_trade_date", "entry_price", "exit_trade_date", "exit_price"])
+        .select(["symbol", "trade_date", "recommend_trade_date", "raw_entry_price", "entry_price", "exit_trade_date", "raw_exit_price", "exit_price"])
     )
 
 
@@ -233,9 +271,9 @@ def _calculate_price_factors(daily: pl.DataFrame) -> pl.DataFrame:
     sorted_daily = daily.sort(["symbol", "trade_date"])
     with_ema = sorted_daily.with_columns(
         [
-            pl.col("close").ewm_mean(span=12, adjust=False).over("symbol").alias("ema12"),
-            pl.col("close").ewm_mean(span=26, adjust=False).over("symbol").alias("ema26"),
-            ((pl.col("close") / pl.col("close").shift(20).over("symbol")) - 1).alias("return_20d"),
+            pl.col("adj_close").ewm_mean(span=12, adjust=False).over("symbol").alias("ema12"),
+            pl.col("adj_close").ewm_mean(span=26, adjust=False).over("symbol").alias("ema26"),
+            ((pl.col("adj_close") / pl.col("adj_close").shift(20).over("symbol")) - 1).alias("return_20d"),
         ]
     ).with_columns((pl.col("ema12") - pl.col("ema26")).alias("dif"))
     return with_ema.with_columns(
@@ -246,6 +284,164 @@ def _calculate_price_factors(daily: pl.DataFrame) -> pl.DataFrame:
             & (pl.col("dif") > pl.col("dea"))
         ).alias("macd_golden_cross")
     )
+
+
+def _with_adjusted_prices(daily: pl.DataFrame) -> pl.DataFrame:
+    frame = daily.sort(["symbol", "trade_date"])
+    if "adj_factor" not in frame.columns:
+        return frame.with_columns(
+            [
+                pl.col("close").alias("adj_close"),
+                (pl.col("open") if "open" in frame.columns else pl.col("close")).alias("adj_open"),
+            ]
+        )
+    with_latest = frame.with_columns(pl.col("adj_factor").drop_nulls().last().over("symbol").alias("_latest_adj_factor"))
+    ratio = (
+        pl.when(pl.col("adj_factor").is_not_null() & pl.col("_latest_adj_factor").is_not_null() & (pl.col("_latest_adj_factor") != 0))
+        .then(pl.col("adj_factor") / pl.col("_latest_adj_factor"))
+        .otherwise(1.0)
+    )
+    return with_latest.with_columns(
+        [
+            (pl.col("close") * ratio).alias("adj_close"),
+            ((pl.col("open") if "open" in frame.columns else pl.col("close")) * ratio).alias("adj_open"),
+        ]
+    ).drop("_latest_adj_factor")
+
+
+def _candidate_001_portfolio_metrics(
+    daily: pl.DataFrame,
+    backtest_rows: pl.DataFrame,
+    holding_days: int,
+    benchmark_symbol: str,
+) -> tuple[dict[str, object], list[str]]:
+    warnings: list[str] = []
+    portfolio = (
+        backtest_rows.group_by("trade_date", maintain_order=True)
+        .agg(pl.col("forward_return").mean().alias("portfolio_return"), pl.col("symbol").alias("symbols"))
+        .sort("trade_date")
+    )
+    returns = [float(value) for value in portfolio["portfolio_return"].to_list()]
+    metrics = _return_series_metrics(returns, periods_per_year=252 / holding_days)
+    metrics.update(_turnover_and_overlap(portfolio))
+
+    benchmark_pairs, benchmark_warning = _benchmark_forward_returns(daily, portfolio, holding_days, benchmark_symbol)
+    if benchmark_warning:
+        warnings.append(benchmark_warning)
+    if benchmark_pairs:
+        matched_strategy_returns = [pair[0] for pair in benchmark_pairs]
+        benchmark_returns = [pair[1] for pair in benchmark_pairs]
+        metrics["benchmark_return"] = _compound_return(benchmark_returns)
+        strategy_return = _compound_return(matched_strategy_returns)
+        metrics["excess_return"] = strategy_return - float(metrics["benchmark_return"])
+        excess = [left - right for left, right in benchmark_pairs]
+        tracking_error = _sample_std(excess) * ((252 / holding_days) ** 0.5)
+        metrics["tracking_error"] = tracking_error
+        metrics["information_ratio"] = (sum(excess) / len(excess) * (252 / holding_days)) / tracking_error if tracking_error else None
+    else:
+        metrics["benchmark_return"] = None
+        metrics["excess_return"] = None
+        metrics["tracking_error"] = None
+        metrics["information_ratio"] = None
+
+    monthly_rows = portfolio.with_columns(pl.col("trade_date").dt.strftime("%Y-%m").alias("month"))
+    monthly = {
+        str(row["month"]): float(row["monthly_return"])
+        for row in monthly_rows.group_by("month", maintain_order=True)
+        .agg(((pl.col("portfolio_return") + 1).product() - 1).alias("monthly_return"))
+        .sort("month")
+        .to_dicts()
+    }
+    metrics["monthly_returns"] = json.dumps(monthly, sort_keys=True)
+    return metrics, warnings
+
+
+def _benchmark_forward_returns(
+    daily: pl.DataFrame,
+    portfolio: pl.DataFrame,
+    holding_days: int,
+    benchmark_symbol: str,
+) -> tuple[list[tuple[float, float]], str | None]:
+    benchmark = daily.filter(pl.col("symbol") == benchmark_symbol)
+    if benchmark.is_empty():
+        return [], f"benchmark {benchmark_symbol} not found"
+    forward = _entry_exit_prices(benchmark, holding_days).with_columns(
+        ((pl.col("exit_price") / pl.col("entry_price")) - 1).alias("benchmark_return")
+    )
+    joined = portfolio.select(["trade_date", "portfolio_return"]).join(
+        forward.select(["trade_date", "benchmark_return"]),
+        on="trade_date",
+        how="left",
+    )
+    matched = joined.filter(pl.col("benchmark_return").is_not_null())
+    values = [(float(row["portfolio_return"]), float(row["benchmark_return"])) for row in matched.to_dicts()]
+    if len(values) != portfolio.height:
+        return values, f"benchmark {benchmark_symbol} missing forward returns for {portfolio.height - len(values)} signal dates"
+    return values, None
+
+
+def _return_series_metrics(returns: list[float], periods_per_year: float) -> dict[str, object]:
+    if not returns:
+        return {}
+    total_return = _compound_return(returns)
+    annual_return = (1 + total_return) ** (periods_per_year / len(returns)) - 1 if total_return > -1 else -1.0
+    volatility = _sample_std(returns) * (periods_per_year ** 0.5)
+    max_drawdown = _max_drawdown(returns)
+    return {
+        "annual_return": annual_return,
+        "annual_volatility": volatility,
+        "sharpe_ratio": annual_return / volatility if volatility else None,
+        "max_drawdown": max_drawdown,
+        "calmar_ratio": annual_return / abs(max_drawdown) if max_drawdown else None,
+    }
+
+
+def _turnover_and_overlap(portfolio: pl.DataFrame) -> dict[str, object]:
+    symbol_sets = [set(values) for values in portfolio["symbols"].to_list()]
+    if len(symbol_sets) < 2:
+        return {"turnover_proxy": None, "holding_overlap": None}
+    overlaps = []
+    turnovers = []
+    for previous, current in zip(symbol_sets, symbol_sets[1:], strict=False):
+        base = len(previous | current)
+        overlap = len(previous & current) / base if base else 0.0
+        overlaps.append(overlap)
+        turnovers.append(1.0 - (len(previous & current) / len(current) if current else 0.0))
+    return {
+        "turnover_proxy": sum(turnovers) / len(turnovers),
+        "holding_overlap": sum(overlaps) / len(overlaps),
+    }
+
+
+def _compound_return(returns: list[float]) -> float:
+    value = 1.0
+    for item in returns:
+        value *= 1.0 + item
+    return value - 1.0
+
+
+def _sample_std(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    return (sum((value - mean) ** 2 for value in values) / (len(values) - 1)) ** 0.5
+
+
+def _max_drawdown(returns: list[float]) -> float:
+    equity = 1.0
+    peak = 1.0
+    drawdown = 0.0
+    for item in returns:
+        equity *= 1.0 + item
+        peak = max(peak, equity)
+        drawdown = min(drawdown, equity / peak - 1.0)
+    return drawdown
+
+
+def _format_optional_float(value: object) -> str:
+    if value is None:
+        return "n/a"
+    return f"{float(value):.6f}"
 
 
 def _load_snapshot_dataset_paths(sqlite_path: Path, snapshot_id: str) -> dict[str, Path]:

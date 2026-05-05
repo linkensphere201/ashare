@@ -79,6 +79,29 @@ def test_rate_limiter_can_be_disabled() -> None:
     assert sleeps == []
 
 
+def test_adjusted_price_helper_uses_latest_factor() -> None:
+    from stock_picker.strategy import _with_adjusted_prices
+
+    frame = pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "600519.SH", "000001.SZ"],
+            "trade_date": [date(2026, 4, 27), date(2026, 4, 28), date(2026, 4, 28)],
+            "open": [9.0, 10.0, 5.0],
+            "close": [10.0, 20.0, 5.5],
+            "adj_factor": [1.0, 2.0, None],
+        }
+    )
+
+    adjusted = _with_adjusted_prices(frame).sort(["symbol", "trade_date"])
+
+    rows = adjusted.select(["symbol", "trade_date", "adj_open", "adj_close"]).to_dicts()
+    assert rows == [
+        {"symbol": "000001.SZ", "trade_date": date(2026, 4, 28), "adj_open": 5.0, "adj_close": 5.5},
+        {"symbol": "600519.SH", "trade_date": date(2026, 4, 27), "adj_open": 4.5, "adj_close": 5.0},
+        {"symbol": "600519.SH", "trade_date": date(2026, 4, 28), "adj_open": 10.0, "adj_close": 20.0},
+    ]
+
+
 def test_register_schemas_is_idempotent(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     _write_daily_prices_schema(tmp_path)
@@ -280,6 +303,50 @@ def test_fetch_provider_requires_tushare_token(tmp_path: Path, monkeypatch) -> N
     assert result.message == "missing required environment variable: TUSHARE_TOKEN"
 
 
+def test_fetch_provider_writes_backtest_foundation_raw_datasets(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "test-token"
+            return FakePro()
+
+    class FakePro:
+        def adj_factor(self, **kwargs):
+            return pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "adj_factor": [2.0]}).to_pandas()
+
+        def index_daily(self, **kwargs):
+            return pl.DataFrame({"ts_code": ["000852.SH"], "trade_date": ["20260428"], "close": [6000.0]}).to_pandas()
+
+        def daily_basic(self, **kwargs):
+            return pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "turnover_rate": [1.2]}).to_pandas()
+
+        def stk_limit(self, **kwargs):
+            return pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "up_limit": [11.0], "down_limit": [9.0]}).to_pandas()
+
+        def suspend_d(self, **kwargs):
+            return pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "suspend_type": ["S"]}).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    for dataset in ["adj_factor", "index_daily", "daily_basic", "stk_limit", "suspend_d"]:
+        result = fetch_provider_raw(
+            config_path=config_path,
+            source="tushare",
+            dataset=dataset,
+            trade_date="2026-04-28",
+            as_of_date="2026-04-28",
+        )
+        assert result.ok
+        assert result.raw_path is not None
+        assert result.raw_path.exists()
+
+
 def test_preview_curated_daily_prices_shows_default_stock_fields(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
@@ -468,6 +535,103 @@ def test_promote_tushare_daily_prices_raw(tmp_path: Path) -> None:
     assert frame.select("symbol").to_series().to_list() == ["600519.SH"]
     assert frame.select("volume").to_series().to_list() == [2100000.0]
     assert frame.select("trade_year").to_series().to_list() == [2026]
+
+
+def test_promote_backtest_foundation_raw_datasets_merge_into_curated(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    _write_daily_prices_schema(
+        tmp_path,
+        extra_fields=[
+            ("asset_type", "string", False),
+            ("open", "double", True),
+            ("high", "double", True),
+            ("low", "double", True),
+            ("close", "double", True),
+            ("pre_close", "double", True),
+            ("volume", "double", True),
+            ("amount", "double", True),
+            ("pct_change", "double", True),
+            ("turnover_rate", "double", True),
+            ("adj_factor", "double", True),
+            ("is_suspended", "bool", True),
+            ("limit_up", "double", True),
+            ("limit_down", "double", True),
+            ("source", "string", False),
+            ("source_batch_id", "string", False),
+            ("data_version", "string", False),
+            ("created_at", "datetime", False),
+            ("trade_year", "integer", False),
+            ("trade_month", "integer", False),
+        ],
+    )
+    _write_risk_events_schema(tmp_path)
+    assert init_storage(config_path).ok
+    assert register_schemas(config_path).ok
+    daily = pl.DataFrame(
+        {
+            "ts_code": ["600519.SH"],
+            "trade_date": ["20260428"],
+            "open": [10.0],
+            "high": [10.5],
+            "low": [9.8],
+            "close": [10.2],
+            "pre_close": [10.0],
+            "vol": [100.0],
+            "amount": [1000.0],
+            "pct_chg": [2.0],
+        }
+    )
+    index = pl.DataFrame(
+        {
+            "ts_code": ["000852.SH"],
+            "trade_date": ["20260428"],
+            "open": [5900.0],
+            "high": [6010.0],
+            "low": [5890.0],
+            "close": [6000.0],
+            "pre_close": [5880.0],
+            "vol": [1.0],
+            "amount": [2.0],
+            "pct_chg": [2.04],
+        }
+    )
+    write_raw_batch(config_path, "tushare", "daily_prices", daily, "2026-04-28")
+    write_raw_batch(config_path, "tushare", "index_daily", index, "2026-04-28")
+    write_raw_batch(config_path, "tushare", "adj_factor", pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "adj_factor": [2.0]}), "2026-04-28")
+    write_raw_batch(config_path, "tushare", "daily_basic", pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "turnover_rate": [1.2]}), "2026-04-28")
+    write_raw_batch(config_path, "tushare", "stk_limit", pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "up_limit": [11.22], "down_limit": [9.18]}), "2026-04-28")
+    write_raw_batch(config_path, "tushare", "suspend_d", pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "suspend_type": ["S"]}), "2026-04-28")
+
+    for dataset in ["daily_prices", "index_daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d"]:
+        result = promote_raw_batch(config_path, "tushare", dataset, "2026-04-28")
+        assert result.ok
+
+    daily_curated = pl.read_parquet(tmp_path / "data" / "curated" / "current" / "daily_prices" / "part-000.parquet").sort("symbol")
+    rows = daily_curated.select(["symbol", "asset_type", "adj_factor", "turnover_rate", "limit_up", "limit_down", "is_suspended"]).to_dicts()
+    assert rows == [
+        {
+            "symbol": "000852.SH",
+            "asset_type": "index",
+            "adj_factor": None,
+            "turnover_rate": None,
+            "limit_up": None,
+            "limit_down": None,
+            "is_suspended": None,
+        },
+        {
+            "symbol": "600519.SH",
+            "asset_type": "stock",
+            "adj_factor": 2.0,
+            "turnover_rate": 1.2,
+            "limit_up": 11.22,
+            "limit_down": 9.18,
+            "is_suspended": True,
+        },
+    ]
+    risk = pl.read_parquet(tmp_path / "data" / "curated" / "current" / "risk_events" / "part-000.parquet")
+    assert risk.select(["symbol", "event_type", "severity", "is_active"]).to_dicts() == [
+        {"symbol": "600519.SH", "event_type": "suspension", "severity": "blocker", "is_active": True}
+    ]
 
 
 def test_promote_raw_records_overlap_notes_and_quality_warning(tmp_path: Path) -> None:
@@ -1016,10 +1180,10 @@ def test_backtest_candidate_001_outputs_forward_return(tmp_path: Path) -> None:
     ).write_parquet(security_path)
     pl.DataFrame(
         {
-            "symbol": ["600519.SH"] * 46,
-            "trade_date": dates,
-            "close": [10.0] * 39 + [20.0] + [22.0] * 5 + [24.2],
-            "amount": [1000.0] * 46,
+            "symbol": ["600519.SH"] * 46 + ["000852.SH"] * 46,
+            "trade_date": dates * 2,
+            "close": ([10.0] * 39 + [20.0] + [22.0] * 5 + [24.2]) + ([100.0] * 40 + [101.0] * 6),
+            "amount": [1000.0] * 92,
         }
     ).write_parquet(daily_path)
     pl.DataFrame(
@@ -1062,6 +1226,14 @@ def test_backtest_candidate_001_outputs_forward_return(tmp_path: Path) -> None:
     assert "signal timing: T close signal, T+1 entry" in result.message
     assert "trade_count: 1" in result.message
     assert "avg_forward_return: 0.100000" in result.message
+    assert "best_trade_return: 0.100000" in result.message
+    assert "annual_return:" in result.message
+    assert "sharpe_ratio:" in result.message
+    assert "max_drawdown:" in result.message
+    assert "benchmark_symbol: 000852.SH" in result.message
+    assert "benchmark_return:" in result.message
+    assert "information_ratio:" in result.message
+    assert "warnings: none" in result.message
 
 
 def test_factor_research_candidate_001_writes_report_artifacts(tmp_path: Path) -> None:
@@ -2215,6 +2387,45 @@ def _write_capital_flow_schema(tmp_path: Path) -> None:
             ]
         )
     (schema_dir / "capital_flow_or_chip.yaml").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_risk_events_schema(tmp_path: Path) -> None:
+    schema_dir = tmp_path / "schemas" / "curated"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    fields = [
+        ("symbol", "string", False, True, False),
+        ("event_date", "date", False, True, False),
+        ("event_type", "string", False, True, False),
+        ("severity", "string", False, False, False),
+        ("is_active", "bool", False, False, False),
+        ("description", "string", True, False, False),
+        ("event_year", "integer", False, False, True),
+        ("event_month", "integer", False, False, True),
+        ("source", "string", False, False, False),
+        ("source_batch_id", "string", False, False, False),
+        ("data_version", "string", False, False, False),
+        ("created_at", "datetime", False, False, False),
+    ]
+    lines = [
+        "dataset_id: risk_events",
+        "dataset_name: Risk Events",
+        "layer: curated",
+        "version: v001",
+        "description: Risk event schema.",
+        "fields:",
+    ]
+    for name, field_type, nullable, primary_key, partition_key in fields:
+        lines.extend(
+            [
+                f"  - name: {name}",
+                f"    type: {field_type}",
+                f"    nullable: {str(nullable).lower()}",
+                f"    primary_key: {str(primary_key).lower()}",
+                f"    partition_key: {str(partition_key).lower()}",
+                f"    description: {name}.",
+            ]
+        )
+    (schema_dir / "risk_events.yaml").write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_security_master_schema(tmp_path: Path) -> None:

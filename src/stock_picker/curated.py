@@ -33,6 +33,11 @@ RAW_TO_CURATED_DATASET = {
     "security_master": "security_master",
     "trading_calendar": "trading_calendar",
     "daily_prices": "daily_prices",
+    "adj_factor": "daily_prices",
+    "index_daily": "daily_prices",
+    "daily_basic": "daily_prices",
+    "stk_limit": "daily_prices",
+    "suspend_d": "daily_prices",
     "moneyflow_dc": "capital_flow_or_chip",
     "cyq_perf": "capital_flow_or_chip",
 }
@@ -181,16 +186,19 @@ def promote_raw_batch(
     if not raw_path.exists():
         return CuratedImportResult(False, f"raw batch file not found: {raw_path}")
 
+    if batch["dataset_name"] == "suspend_d":
+        return _promote_suspend_batch(config, batch)
+
     schema = _load_registered_schema(config, curated_dataset)
     raw_frame = pl.read_csv(raw_path)
     mapped = _map_tushare_raw_to_curated(raw_frame, str(batch["dataset_name"]))
     now = datetime.now(UTC).isoformat(timespec="seconds")
     data_version = str(batch["business_date"] or now[:10])
     mapped = _enrich_frame(mapped, schema, source, str(batch["batch_id"]), data_version, now)
-    mapped = _fill_missing_nullable_columns(mapped, schema)
     primary_keys = _primary_key_columns(schema)
     overlap_summary = _current_overlap_summary(config, curated_dataset, mapped, primary_keys)
     mapped = _merge_with_existing_current(config, curated_dataset, mapped, schema)
+    mapped = _fill_missing_nullable_columns(mapped, schema)
     validation_error = _validate_required_columns(mapped, schema)
     if validation_error:
         return CuratedImportResult(False, validation_error)
@@ -233,6 +241,13 @@ def promote_raw_run(
         curated_dataset = RAW_TO_CURATED_DATASET.get(raw_dataset)
         if curated_dataset is None:
             return CuratedImportResult(False, f"no curated mapping for raw dataset: {raw_dataset}")
+        if raw_dataset == "suspend_d":
+            for batch in raw_batches:
+                result = _promote_suspend_batch(config, batch)
+                if not result.ok:
+                    return result
+                results.append(result)
+            continue
         schema = _load_registered_schema(config, curated_dataset)
         now = datetime.now(UTC).isoformat(timespec="seconds")
         data_version = str(raw_batches[-1]["business_date"] or now[:10])
@@ -246,13 +261,13 @@ def promote_raw_run(
             raw_frame = pl.read_csv(raw_path)
             mapped = _map_tushare_raw_to_curated(raw_frame, raw_dataset)
             mapped = _enrich_frame(mapped, schema, str(batch["source"]), str(batch["batch_id"]), data_version, now)
-            mapped = _fill_missing_nullable_columns(mapped, schema)
             mapped_frames.append(mapped)
 
         combined = pl.concat(mapped_frames, how="diagonal_relaxed")
         primary_keys = _primary_key_columns(schema)
         overlap_summary = _current_overlap_summary(config, curated_dataset, combined, primary_keys)
         combined = _merge_with_existing_current(config, curated_dataset, combined, schema)
+        combined = _fill_missing_nullable_columns(combined, schema)
         validation_error = _validate_required_columns(combined, schema)
         if validation_error:
             return CuratedImportResult(False, validation_error)
@@ -281,6 +296,72 @@ def promote_raw_run(
     total_rows = sum(result.row_count for result in results)
     message = "promoted raw run: " + "; ".join(result.message for result in results)
     return CuratedImportResult(True, message, results[-1].output_path, total_rows)
+
+
+def _promote_suspend_batch(config: StorageConfig, batch: dict[str, object]) -> CuratedImportResult:
+    raw_path = Path(str(batch["raw_path"]))
+    if not raw_path.exists():
+        return CuratedImportResult(False, f"raw batch file not found: {raw_path}")
+
+    raw_frame = pl.read_csv(raw_path)
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    data_version = str(batch["business_date"] or now[:10])
+    daily_schema = _load_registered_schema(config, "daily_prices")
+    risk_schema = _load_registered_schema(config, "risk_events")
+    daily_frame = _map_tushare_raw_to_curated(raw_frame, "suspend_d")
+    risk_frame = _map_tushare_suspend_to_risk_events(raw_frame)
+
+    daily_frame = _enrich_frame(daily_frame, daily_schema, str(batch["source"]), str(batch["batch_id"]), data_version, now)
+    risk_frame = _enrich_frame(risk_frame, risk_schema, str(batch["source"]), str(batch["batch_id"]), data_version, now)
+    risk_frame = _fill_missing_nullable_columns(risk_frame, risk_schema)
+
+    daily_frame = _merge_with_existing_current(config, "daily_prices", daily_frame, daily_schema)
+    daily_frame = _fill_missing_nullable_columns(daily_frame, daily_schema)
+    daily_error = _validate_required_columns(daily_frame, daily_schema)
+    if daily_error:
+        return CuratedImportResult(False, daily_error)
+    risk_error = _validate_required_columns(risk_frame, risk_schema)
+    if risk_error:
+        return CuratedImportResult(False, risk_error)
+
+    daily_batches = _merge_source_batch_ids(
+        _load_current_source_batch_ids(config.metadata_sqlite_path, "daily_prices"),
+        [str(batch["batch_id"])],
+    )
+    risk_batches = _merge_source_batch_ids(
+        _load_current_source_batch_ids(config.metadata_sqlite_path, "risk_events"),
+        [str(batch["batch_id"])],
+    )
+    daily_result = _write_curated_current(
+        config=config,
+        dataset_id="daily_prices",
+        frame=daily_frame,
+        schema=daily_schema,
+        as_of_date=data_version,
+        source_batch_ids=daily_batches,
+        created_at=now,
+        notes=_curated_notes(str(batch["batch_id"]), "suspend_d", {}),
+    )
+    if not daily_result.ok:
+        return daily_result
+    risk_result = _write_curated_current(
+        config=config,
+        dataset_id="risk_events",
+        frame=_merge_with_existing_current(config, "risk_events", risk_frame, risk_schema),
+        schema=risk_schema,
+        as_of_date=data_version,
+        source_batch_ids=risk_batches,
+        created_at=now,
+        notes=_curated_notes(str(batch["batch_id"]), "suspend_d", {}),
+    )
+    if not risk_result.ok:
+        return risk_result
+    return CuratedImportResult(
+        True,
+        f"promoted suspend_d into curated current: daily_prices rows={daily_result.row_count}; risk_events rows={risk_result.row_count}",
+        daily_result.output_path,
+        daily_result.row_count + risk_result.row_count,
+    )
 
 
 def inspect_curated(config_path: Path, dataset_id: str) -> CuratedInspectionResult:
@@ -629,6 +710,55 @@ def _map_tushare_raw_to_curated(frame: pl.DataFrame, dataset: str) -> pl.DataFra
                 pl.col("pct_chg").alias("pct_change"),
             ]
         ).select(["symbol", "trade_date", "asset_type", "open", "high", "low", "close", "pre_close", "volume", "amount", "pct_change"])
+    if dataset == "index_daily":
+        volume_expr = pl.col("vol").alias("volume") if "vol" in frame.columns else pl.lit(None).alias("volume")
+        amount_expr = pl.col("amount").alias("amount") if "amount" in frame.columns else pl.lit(None).alias("amount")
+        pct_change_expr = pl.col("pct_chg").alias("pct_change") if "pct_chg" in frame.columns else pl.lit(None).alias("pct_change")
+        pre_close_expr = pl.col("pre_close").alias("pre_close") if "pre_close" in frame.columns else pl.lit(None).alias("pre_close")
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("symbol"),
+                _parse_yyyymmdd("trade_date").alias("trade_date"),
+                pl.lit("index").alias("asset_type"),
+                volume_expr,
+                amount_expr,
+                pct_change_expr,
+                pre_close_expr,
+            ]
+        ).select(["symbol", "trade_date", "asset_type", "open", "high", "low", "close", "pre_close", "volume", "amount", "pct_change"])
+    if dataset == "adj_factor":
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("symbol"),
+                _parse_yyyymmdd("trade_date").alias("trade_date"),
+                pl.col("adj_factor").cast(pl.Float64, strict=False).alias("adj_factor"),
+            ]
+        ).select(["symbol", "trade_date", "adj_factor"])
+    if dataset == "daily_basic":
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("symbol"),
+                _parse_yyyymmdd("trade_date").alias("trade_date"),
+                pl.col("turnover_rate").cast(pl.Float64, strict=False).alias("turnover_rate"),
+            ]
+        ).select(["symbol", "trade_date", "turnover_rate"])
+    if dataset == "stk_limit":
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("symbol"),
+                _parse_yyyymmdd("trade_date").alias("trade_date"),
+                pl.col("up_limit").cast(pl.Float64, strict=False).alias("limit_up"),
+                pl.col("down_limit").cast(pl.Float64, strict=False).alias("limit_down"),
+            ]
+        ).select(["symbol", "trade_date", "limit_up", "limit_down"])
+    if dataset == "suspend_d":
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("symbol"),
+                _parse_yyyymmdd("trade_date").alias("trade_date"),
+                (pl.col("suspend_type") == "S").alias("is_suspended"),
+            ]
+        ).select(["symbol", "trade_date", "is_suspended"])
     if dataset == "moneyflow_dc":
         return frame.with_columns(
             [
@@ -656,6 +786,24 @@ def _map_tushare_raw_to_curated(frame: pl.DataFrame, dataset: str) -> pl.DataFra
             ]
         ).select(["symbol", "trade_date", "close_profit_ratio", "data_method"])
     raise ValueError(f"unsupported raw dataset mapping: {dataset}")
+
+
+def _map_tushare_suspend_to_risk_events(frame: pl.DataFrame) -> pl.DataFrame:
+    return frame.with_columns(
+        [
+            pl.col("ts_code").alias("symbol"),
+            _parse_yyyymmdd("trade_date").alias("event_date"),
+            pl.lit("suspension").alias("event_type"),
+            pl.when(pl.col("suspend_type") == "S").then(pl.lit("blocker")).otherwise(pl.lit("info")).alias("severity"),
+            (pl.col("suspend_type") == "S").alias("is_active"),
+            pl.concat_str(
+                [
+                    pl.lit("Tushare suspend_d suspend_type="),
+                    pl.col("suspend_type").cast(pl.Utf8),
+                ]
+            ).alias("description"),
+        ]
+    ).select(["symbol", "event_date", "event_type", "severity", "is_active", "description"])
 
 
 def _parse_yyyymmdd(column: str) -> pl.Expr:
