@@ -9,6 +9,12 @@ import sys
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
+from stock_picker.factor_exploration import (
+    backtest_candidate_002,
+    compute_daily_factors,
+    evaluate_factor_run,
+    rank_candidate_002,
+)
 from stock_picker.factor_research import research_candidate_001
 from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily
 from stock_picker.quality import check_curated_quality
@@ -59,6 +65,25 @@ def build_parser() -> argparse.ArgumentParser:
     factor_research_candidate_cmd.add_argument("--report-id", help="Optional stable report id")
     factor_research_candidate_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
+    factor_compute_daily_cmd = factor_subparsers.add_parser(
+        "compute-daily",
+        help="Compute Strategy Candidate 002 daily factor table from a snapshot",
+    )
+    factor_compute_daily_cmd.add_argument("--snapshot-id", required=True, help="Snapshot id")
+    factor_compute_daily_cmd.add_argument("--start-date", required=True, help="Inclusive start date, such as 2026-01-01")
+    factor_compute_daily_cmd.add_argument("--end-date", required=True, help="Inclusive end date, such as 2026-04-28")
+    factor_compute_daily_cmd.add_argument("--run-id", help="Optional stable factor run id")
+    factor_compute_daily_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    factor_evaluate_cmd = factor_subparsers.add_parser(
+        "evaluate",
+        help="Evaluate a daily factor run with IC, Rank IC, grouped returns, coverage, and correlation",
+    )
+    factor_evaluate_cmd.add_argument("--factor-run-id", required=True, help="Factor run id from factor compute-daily")
+    factor_evaluate_cmd.add_argument("--forward-days", type=int, default=20, help="Forward return window in trading rows")
+    factor_evaluate_cmd.add_argument("--groups", type=int, default=5, help="Number of factor groups for grouped returns")
+    factor_evaluate_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
     rank_candidate_cmd = strategy_subparsers.add_parser(
         "rank-candidate-001",
         help="Rank Strategy Candidate 001 v2 candidates from a snapshot",
@@ -76,6 +101,25 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_candidate_cmd.add_argument("--top", type=int, default=10, help="Candidate count per signal date")
     backtest_candidate_cmd.add_argument("--benchmark-symbol", default="000852.SH", help="Benchmark symbol for relative metrics")
     backtest_candidate_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    rank_candidate_002_cmd = strategy_subparsers.add_parser(
+        "rank-candidate-002",
+        help="Rank Strategy Candidate 002 candidates from a factor run",
+    )
+    rank_candidate_002_cmd.add_argument("--factor-run-id", required=True, help="Factor run id from factor compute-daily")
+    rank_candidate_002_cmd.add_argument("--trade-date", help="Trade date to rank; defaults to latest factor date")
+    rank_candidate_002_cmd.add_argument("--top", type=int, default=20, help="Candidate count")
+    rank_candidate_002_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    backtest_candidate_002_cmd = strategy_subparsers.add_parser(
+        "backtest-candidate-002",
+        help="Backtest Strategy Candidate 002 from a factor run",
+    )
+    backtest_candidate_002_cmd.add_argument("--factor-run-id", required=True, help="Factor run id from factor compute-daily")
+    backtest_candidate_002_cmd.add_argument("--top", type=int, default=10, help="Candidate count per rebalance date")
+    backtest_candidate_002_cmd.add_argument("--rebalance", choices=["daily", "weekly"], default="weekly", help="Rebalance frequency")
+    backtest_candidate_002_cmd.add_argument("--benchmark-symbol", default="000852.SH", help="Benchmark symbol for relative metrics")
+    backtest_candidate_002_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     fetch_cmd = provider_subparsers.add_parser("fetch", help="Fetch a raw provider dataset into the raw store")
     fetch_cmd.add_argument("--source", required=True, help="Provider source, such as tushare")
@@ -600,6 +644,28 @@ def main(argv: list[str] | None = None) -> int:
         print(result.message)
         return 1
 
+    if args.command == "strategy" and args.strategy_command == "rank-candidate-002":
+        result = rank_candidate_002(Path(args.config), args.factor_run_id, args.trade_date, args.top)
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "strategy" and args.strategy_command == "backtest-candidate-002":
+        result = backtest_candidate_002(
+            Path(args.config),
+            factor_run_id=args.factor_run_id,
+            top=args.top,
+            rebalance=args.rebalance,
+            benchmark_symbol=args.benchmark_symbol,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
     if args.command == "factor" and args.factor_command == "research-candidate-001":
         result = research_candidate_001(
             Path(args.config),
@@ -607,6 +673,33 @@ def main(argv: list[str] | None = None) -> int:
             holding_days=args.holding_days,
             top=args.top,
             report_id=args.report_id,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "factor" and args.factor_command == "compute-daily":
+        result = compute_daily_factors(
+            Path(args.config),
+            snapshot_id=args.snapshot_id,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            run_id=args.run_id,
+        )
+        if result.ok:
+            print(result.message)
+            return 0
+        print(result.message)
+        return 1
+
+    if args.command == "factor" and args.factor_command == "evaluate":
+        result = evaluate_factor_run(
+            Path(args.config),
+            factor_run_id=args.factor_run_id,
+            forward_days=args.forward_days,
+            groups=args.groups,
         )
         if result.ok:
             print(result.message)

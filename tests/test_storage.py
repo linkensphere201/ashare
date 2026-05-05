@@ -7,6 +7,7 @@ import polars as pl
 
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
+from stock_picker.factor_exploration import backtest_candidate_002, compute_daily_factors, evaluate_factor_run, rank_candidate_002
 from stock_picker.factor_research import research_candidate_001
 import stock_picker.provider as provider_module
 from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily, write_raw_batch
@@ -1352,6 +1353,149 @@ def test_factor_research_candidate_001_writes_report_artifacts(tmp_path: Path) -
     assert "factor_value" in shown.message
     assert "factor_pass" not in shown.message
     assert "+-" in shown.message
+
+
+def test_factor_exploration_computes_evaluates_and_backtests_candidate_002(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    data_root = tmp_path / "data" / "curated" / "current"
+    security_path = data_root / "security_master" / "part-000.parquet"
+    daily_path = data_root / "daily_prices" / "part-000.parquet"
+    capital_path = data_root / "capital_flow_or_chip" / "part-000.parquet"
+    security_path.parent.mkdir(parents=True)
+    daily_path.parent.mkdir(parents=True)
+    capital_path.parent.mkdir(parents=True)
+
+    dates = [date(2026, 1, 1) + timedelta(days=index) for index in range(90)]
+    symbols = ["600519.SH", "000001.SZ", "000002.SZ"]
+    security_rows = [
+        {
+            "symbol": "600519.SH",
+            "name": "Kweichow Moutai",
+            "status": "active",
+            "market_segment": "sh_main",
+            "industry": "Liquor",
+            "list_date": date(2001, 8, 27),
+        },
+        {
+            "symbol": "000001.SZ",
+            "name": "Ping An Bank",
+            "status": "active",
+            "market_segment": "sz_main",
+            "industry": "Bank",
+            "list_date": date(1991, 4, 3),
+        },
+        {
+            "symbol": "000002.SZ",
+            "name": "*ST Test",
+            "status": "active",
+            "market_segment": "sz_main",
+            "industry": "Real Estate",
+            "list_date": date(2025, 12, 1),
+        },
+    ]
+    daily_rows = []
+    capital_rows = []
+    for symbol_index, symbol in enumerate(symbols):
+        for index, trade_date in enumerate(dates):
+            close = 10.0 + index * (0.15 - symbol_index * 0.03)
+            daily_rows.append(
+                {
+                    "symbol": symbol,
+                    "trade_date": trade_date,
+                    "asset_type": "stock",
+                    "open": close * 0.99,
+                    "close": close,
+                    "amount": 70000.0 - symbol_index * 5000.0,
+                    "turnover_rate": 1.0,
+                    "adj_factor": 1.0 + index * 0.001,
+                    "is_suspended": symbol == "000001.SZ" and index == 89,
+                    "limit_up": close * 1.1,
+                    "limit_down": close * 0.9,
+                }
+            )
+            capital_rows.append(
+                {
+                    "symbol": symbol,
+                    "trade_date": trade_date,
+                    "main_net_inflow_rate": 2.0 - symbol_index * 0.5 + index * 0.01,
+                    "close_profit_ratio": 80.0 - symbol_index * 5.0 + index * 0.02,
+                }
+            )
+    for index, trade_date in enumerate(dates):
+        close = 1000.0 + index
+        daily_rows.append(
+            {
+                "symbol": "000852.SH",
+                "trade_date": trade_date,
+                "asset_type": "index",
+                "open": close,
+                "close": close,
+                "amount": 1.0,
+                "adj_factor": None,
+            }
+        )
+    pl.DataFrame(security_rows).write_parquet(security_path)
+    pl.DataFrame(daily_rows).write_parquet(daily_path)
+    pl.DataFrame(capital_rows).write_parquet(capital_path)
+    manifest = {
+        "curated_versions": {
+            "security_master": {"path": str(security_path)},
+            "daily_prices": {"path": str(daily_path)},
+            "capital_flow_or_chip": {"path": str(capital_path)},
+        }
+    }
+    sqlite_path = tmp_path / "data" / "metadata.sqlite"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO snapshot_manifests (
+              snapshot_id,
+              as_of_date,
+              created_at,
+              data_frequency,
+              config_version,
+              manifest_json,
+              notes
+            )
+            VALUES ('snapshot_factor_002', '2026-03-31', '2026-03-31T16:00:00+00:00', 'daily', 'test', ?, NULL)
+            """,
+            (json.dumps(manifest),),
+        )
+
+    compute = compute_daily_factors(
+        config_path,
+        snapshot_id="snapshot_factor_002",
+        start_date="2026-03-01",
+        end_date="2026-03-31",
+        run_id="factor_002_test",
+    )
+    assert compute.ok
+    factor_path = tmp_path / "data" / "reports" / "factor_exploration" / "factor_002_test" / "stock_factors_daily.csv"
+    factors = pl.read_csv(factor_path, try_parse_dates=True)
+    assert {"mom_20", "flow_5d", "winner_rate", "risk_score", "total_score", "tradable_flag", "exclusion_reason"}.issubset(set(factors.columns))
+    assert factors.filter((pl.col("symbol") == "000002.SZ") & (pl.col("exclusion_reason") == "st_security")).height > 0
+
+    evaluate = evaluate_factor_run(config_path, "factor_002_test", forward_days=5, groups=5)
+    assert evaluate.ok
+    run_dir = tmp_path / "data" / "reports" / "factor_exploration" / "factor_002_test"
+    assert (run_dir / "evaluation_summary.json").exists()
+    assert (run_dir / "ic_by_date.csv").exists()
+    assert (run_dir / "group_returns.csv").exists()
+    assert (run_dir / "coverage.csv").exists()
+    assert (run_dir / "correlation.csv").exists()
+
+    ranking = rank_candidate_002(config_path, "factor_002_test", trade_date="2026-03-31", top=5)
+    assert ranking.ok
+    assert "600519.SH" in ranking.message
+    assert "000002.SZ" not in ranking.message
+
+    backtest = backtest_candidate_002(config_path, "factor_002_test", top=1, rebalance="weekly", benchmark_symbol="000852.SH")
+    assert backtest.ok
+    assert "Strategy Candidate 002 backtest" in backtest.message
+    assert "rebalance: weekly" in backtest.message
+    assert "sharpe_ratio:" in backtest.message
+    assert "excess_return:" in backtest.message
 
 
 def test_fetch_cyq_perf_requires_ts_code(tmp_path: Path) -> None:

@@ -311,6 +311,26 @@ stock-picker strategy backtest-candidate-001 --config config/storage.yaml --snap
 
 The backtest reports trade-level metrics plus first-pass portfolio diagnostics, including annualized return, annualized volatility, Sharpe ratio, maximum drawdown, Calmar ratio, benchmark return, excess return, tracking error, information ratio, turnover proxy, holding overlap, and monthly returns.
 
+Strategy Candidate 002 uses the second-milestone Flow Momentum Quality factor table:
+
+- Momentum/trend score from adjusted prices
+- Capital-flow score from `main_net_inflow_rate`
+- Profit-chip score from `winner_rate`
+- Risk score from volatility and drawdown
+- Liquidity score from amount stability
+- Tradability filters for ST names, suspension, limit-up, listing age, and low liquidity
+
+Compute a factor run, evaluate it, rank candidates, and backtest the Strategy 002 portfolio:
+
+```powershell
+stock-picker factor compute-daily --config config/storage.yaml --snapshot-id snapshot_20260428_001 --start-date 2026-01-01 --end-date 2026-04-28 --run-id factor_002_20260428
+stock-picker factor evaluate --config config/storage.yaml --factor-run-id factor_002_20260428 --forward-days 20
+stock-picker strategy rank-candidate-002 --config config/storage.yaml --factor-run-id factor_002_20260428 --trade-date 2026-04-28 --top 20
+stock-picker strategy backtest-candidate-002 --config config/storage.yaml --factor-run-id factor_002_20260428 --top 10 --rebalance weekly --benchmark-symbol 000852.SH
+```
+
+Factor exploration artifacts are written under `data/reports/factor_exploration/<factor_run_id>/` and are not registered as curated datasets.
+
 The output is a research/watchlist result, not direct buy or sell advice.
 
 ## CLI Reference
@@ -391,12 +411,16 @@ stock-picker provider sync-latest --config config/storage.yaml --dataset daily_p
 | --- | --- |
 | `stock-picker strategy rank-candidate-001` | Rank Strategy Candidate 001 v2 candidates from a snapshot |
 | `stock-picker strategy backtest-candidate-001` | Run forward-return diagnostics for Strategy Candidate 001 v2 |
+| `stock-picker strategy rank-candidate-002` | Rank Strategy Candidate 002 candidates from a factor run |
+| `stock-picker strategy backtest-candidate-002` | Backtest Strategy Candidate 002 daily or weekly Top-N portfolio |
 
 ### Factor Research
 
 | Command | Purpose |
 | --- | --- |
 | `stock-picker factor research-candidate-001` | Generate Strategy Candidate 001 v2 factor summary, explanation, ranking CSV, backtest trades CSV, metrics JSON, and Markdown report |
+| `stock-picker factor compute-daily` | Compute Strategy Candidate 002 daily factor table from a snapshot |
+| `stock-picker factor evaluate` | Evaluate a factor run with IC, Rank IC, ICIR, grouped returns, coverage, and correlation |
 
 Example:
 
