@@ -68,9 +68,9 @@ def sync_latest(
         return SyncLatestResult(False, "sync-latest requires a non-negative --cyq-requests-per-minute")
 
     config = load_storage_config(config_path)
-    token = _load_token(token_env, config.project_root / ".env")
+    token = os.environ.get(token_env)
     if not token:
-        return SyncLatestResult(False, f"missing required environment variable or .env value: {token_env}")
+        return SyncLatestResult(False, f"missing required environment variable: {token_env}")
     initialize_metadata_catalog(config.metadata_sqlite_path)
     today = end_date or date.today().isoformat()
     calendar_start = _calendar_fetch_start(config.current_curated_root / "trading_calendar" / "part-000.parquet", today, calendar_lookback_days)
@@ -220,26 +220,6 @@ def _calendar_fetch_start(calendar_path: Path, end_date: str, lookback_days: int
         return fallback.isoformat()
     next_day = date.fromisoformat(max(local_dates)) + timedelta(days=1)
     return min(next_day, fallback).isoformat()
-
-
-def _load_token(token_env: str, env_path: Path) -> str | None:
-    token = os.environ.get(token_env)
-    if token:
-        return token
-    if not env_path.exists():
-        return None
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        if key.strip() != token_env:
-            continue
-        token = value.strip().strip("\"'")
-        if token:
-            os.environ[token_env] = token
-            return token
-    return None
 
 
 def _provider_calendar_open_dates(frame: pl.DataFrame) -> list[str]:

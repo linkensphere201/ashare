@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
 import sys
 
+from stock_picker.config import StorageConfig, load_storage_config
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.factor_exploration import (
@@ -26,6 +29,19 @@ from stock_picker.sync import sync_latest
 
 
 LOGGER_NAME = "stock_picker"
+
+
+@dataclass(frozen=True)
+class CliContext:
+    config_path: Path
+    storage_config: StorageConfig
+
+
+@dataclass(frozen=True)
+class CliCommandResult:
+    ok: bool
+    message: str
+    exit_code: int | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -212,6 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
     probe_cmd.add_argument("--start-date", help="Start date, such as 2026-01-01")
     probe_cmd.add_argument("--end-date", help="End date, such as 2026-04-28")
     probe_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing provider token")
+    probe_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     sync_latest_cmd = provider_subparsers.add_parser(
         "sync-latest",
@@ -362,79 +379,69 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    return after_execute(run_cli_command(args))
 
+
+def run_cli_command(args: argparse.Namespace) -> CliCommandResult:
+    before = before_execute(args)
+    if isinstance(before, CliCommandResult):
+        return before
+    return _to_cli_result(execute_command(args, before))
+
+
+def before_execute(args: argparse.Namespace) -> CliContext | CliCommandResult:
+    config_path = Path(getattr(args, "config", "config/storage.yaml"))
+    try:
+        storage_config = load_storage_config(config_path)
+    except Exception as error:
+        return CliCommandResult(False, f"failed to load storage config: {error}")
+    token_env = getattr(args, "token_env", None)
+    if token_env:
+        _load_env_value(token_env, storage_config.project_root / ".env")
+    return CliContext(config_path=config_path, storage_config=storage_config)
+
+
+def execute_command(args: argparse.Namespace, context: CliContext):
     if args.command == "storage" and args.storage_command == "init":
-        result = init_storage(Path(args.config))
-        print(result.message)
-        return 0
+        return init_storage(context.config_path)
 
     if args.command == "storage" and args.storage_command == "validate":
-        result = validate_storage(Path(args.config))
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return validate_storage(context.config_path)
 
     if args.command == "storage" and args.storage_command == "register-schemas":
-        result = register_schemas(Path(args.config))
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return register_schemas(context.config_path)
 
     if args.command == "storage" and args.storage_command == "import-curated-csv":
-        result = import_curated_csv(
-            config_path=Path(args.config),
+        return import_curated_csv(
+            config_path=context.config_path,
             dataset_id=args.dataset,
             input_path=Path(args.input),
             source=args.source,
             as_of_date=args.as_of_date,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "storage" and args.storage_command == "promote-raw":
-        result = promote_raw_batch(
-            config_path=Path(args.config),
+        return promote_raw_batch(
+            config_path=context.config_path,
             source=args.source,
             dataset=args.dataset,
             as_of_date=args.as_of_date,
             batch_id=args.batch_id,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "storage" and args.storage_command == "promote-raw-run":
-        result = promote_raw_run(
-            config_path=Path(args.config),
+        return promote_raw_run(
+            config_path=context.config_path,
             run_id=args.run_id,
             dataset=args.dataset,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "storage" and args.storage_command == "inspect-curated":
-        result = inspect_curated(Path(args.config), args.dataset)
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return inspect_curated(context.config_path, args.dataset)
 
     if args.command == "storage" and args.storage_command == "preview-curated":
-        result = preview_curated(
-            config_path=Path(args.config),
+        return preview_curated(
+            config_path=context.config_path,
             dataset_id=args.dataset,
             symbol=args.symbol,
             start_date=args.start_date,
@@ -442,59 +449,29 @@ def main(argv: list[str] | None = None) -> int:
             columns=args.columns,
             limit=args.limit,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "storage" and args.storage_command == "list-runs":
-        result = list_runs(Path(args.config), args.limit)
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return list_runs(context.config_path, args.limit)
 
     if args.command == "storage" and args.storage_command == "inspect-run":
-        result = inspect_run(Path(args.config), args.batch_id)
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return inspect_run(context.config_path, args.batch_id)
 
     if args.command == "storage" and args.storage_command == "check-quality":
-        result = check_curated_quality(Path(args.config), args.dataset)
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return check_curated_quality(context.config_path, args.dataset)
 
     if args.command == "storage" and args.storage_command == "create-snapshot":
-        result = create_snapshot(
-            Path(args.config),
+        return create_snapshot(
+            context.config_path,
             as_of_date=args.as_of_date,
             config_version=args.config_version,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "storage" and args.storage_command == "inspect-snapshot":
-        result = inspect_snapshot(Path(args.config), args.snapshot_id)
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return inspect_snapshot(context.config_path, args.snapshot_id)
 
     if args.command == "provider" and args.provider_command == "fetch":
-        result = fetch_provider_raw(
-            config_path=Path(args.config),
+        return fetch_provider_raw(
+            config_path=context.config_path,
             source=args.source,
             dataset=args.dataset,
             start_date=args.start_date,
@@ -504,15 +481,10 @@ def main(argv: list[str] | None = None) -> int:
             trade_date=args.trade_date,
             token_env=args.token_env,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "provider" and args.provider_command == "fetch-cyq-perf-batch":
-        result = fetch_cyq_perf_batch(
-            config_path=Path(args.config),
+        return fetch_cyq_perf_batch(
+            config_path=context.config_path,
             source=args.source,
             start_date=args.start_date,
             end_date=args.end_date,
@@ -523,16 +495,11 @@ def main(argv: list[str] | None = None) -> int:
             requests_per_minute=args.requests_per_minute,
             token_env=args.token_env,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "provider" and args.provider_command == "run-cyq-perf-batches":
         progress_logger = _configure_progress_logger()
-        result = run_cyq_perf_batches(
-            config_path=Path(args.config),
+        return run_cyq_perf_batches(
+            config_path=context.config_path,
             source=args.source,
             run_id=args.run_id,
             start_date=args.start_date,
@@ -548,16 +515,11 @@ def main(argv: list[str] | None = None) -> int:
             retry_wait_seconds=args.retry_wait_seconds,
             backoff_multiplier=args.backoff_multiplier,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "provider" and args.provider_command == "run-market-daily":
         progress_logger = _configure_progress_logger()
-        result = run_market_daily(
-            config_path=Path(args.config),
+        return run_market_daily(
+            config_path=context.config_path,
             source=args.source,
             run_id=args.run_id,
             datasets=args.dataset,
@@ -574,14 +536,9 @@ def main(argv: list[str] | None = None) -> int:
             progress_every_tasks=args.progress_every_tasks,
             progress_callback=progress_logger.info,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "provider" and args.provider_command == "probe":
-        result = probe_provider_api(
+        return probe_provider_api(
             source=args.source,
             api=args.api,
             ts_code=args.ts_code,
@@ -590,16 +547,11 @@ def main(argv: list[str] | None = None) -> int:
             end_date=args.end_date,
             token_env=args.token_env,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "provider" and args.provider_command == "sync-latest":
         progress_logger = _configure_progress_logger()
-        result = sync_latest(
-            config_path=Path(args.config),
+        return sync_latest(
+            config_path=context.config_path,
             source=args.source,
             datasets=args.dataset,
             start_date=args.start_date,
@@ -622,105 +574,94 @@ def main(argv: list[str] | None = None) -> int:
             progress_every_batches=args.progress_every_batches,
             progress_callback=progress_logger.info,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "strategy" and args.strategy_command == "rank-candidate-001":
-        result = rank_candidate_001(Path(args.config), args.snapshot_id, args.top)
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return rank_candidate_001(context.config_path, args.snapshot_id, args.top)
 
     if args.command == "strategy" and args.strategy_command == "backtest-candidate-001":
-        result = backtest_candidate_001(Path(args.config), args.snapshot_id, args.holding_days, args.top, args.benchmark_symbol)
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return backtest_candidate_001(context.config_path, args.snapshot_id, args.holding_days, args.top, args.benchmark_symbol)
 
     if args.command == "strategy" and args.strategy_command == "rank-candidate-002":
-        result = rank_candidate_002(Path(args.config), args.factor_run_id, args.trade_date, args.top)
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
+        return rank_candidate_002(context.config_path, args.factor_run_id, args.trade_date, args.top)
 
     if args.command == "strategy" and args.strategy_command == "backtest-candidate-002":
-        result = backtest_candidate_002(
-            Path(args.config),
+        return backtest_candidate_002(
+            context.config_path,
             factor_run_id=args.factor_run_id,
             top=args.top,
             rebalance=args.rebalance,
             benchmark_symbol=args.benchmark_symbol,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "factor" and args.factor_command == "research-candidate-001":
-        result = research_candidate_001(
-            Path(args.config),
+        return research_candidate_001(
+            context.config_path,
             snapshot_id=args.snapshot_id,
             holding_days=args.holding_days,
             top=args.top,
             report_id=args.report_id,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "factor" and args.factor_command == "compute-daily":
-        result = compute_daily_factors(
-            Path(args.config),
+        return compute_daily_factors(
+            context.config_path,
             snapshot_id=args.snapshot_id,
             start_date=args.start_date,
             end_date=args.end_date,
             run_id=args.run_id,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "factor" and args.factor_command == "evaluate":
-        result = evaluate_factor_run(
-            Path(args.config),
+        return evaluate_factor_run(
+            context.config_path,
             factor_run_id=args.factor_run_id,
             forward_days=args.forward_days,
             groups=args.groups,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
     if args.command == "reports" and args.reports_command == "show-report":
-        result = show_report(
-            Path(args.config),
+        return show_report(
+            context.config_path,
             report_id=args.report_id,
             limit=args.limit,
         )
-        if result.ok:
-            print(result.message)
-            return 0
-        print(result.message)
-        return 1
 
-    parser.error("unsupported command")
-    return 2
+    return CliCommandResult(False, "unsupported command", 2)
+
+
+def after_execute(result: CliCommandResult) -> int:
+    print(result.message)
+    if result.exit_code is not None:
+        return result.exit_code
+    return 0 if result.ok else 1
+
+
+def _to_cli_result(result: object) -> CliCommandResult:
+    if isinstance(result, CliCommandResult):
+        return result
+    ok = bool(getattr(result, "ok", False))
+    message = str(getattr(result, "message", result))
+    return CliCommandResult(ok=ok, message=message)
+
+
+def _load_env_value(token_env: str, env_path: Path) -> str | None:
+    token = os.environ.get(token_env)
+    if token:
+        return token
+    if not env_path.exists():
+        return None
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() != token_env:
+            continue
+        token = value.strip().strip("\"'")
+        if token:
+            os.environ[token_env] = token
+            return token
+    return None
 
 
 def _configure_progress_logger() -> logging.Logger:

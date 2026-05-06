@@ -5,6 +5,7 @@ import sqlite3
 
 import polars as pl
 
+from stock_picker.cli import main as cli_main
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.factor_exploration import backtest_candidate_002, compute_daily_factors, evaluate_factor_run, rank_candidate_002
@@ -2423,6 +2424,174 @@ def test_sync_latest_dry_run_reports_missing_dates(tmp_path: Path, monkeypatch) 
     assert "- moneyflow_dc: 2 [2026-04-29, 2026-04-30]" in result.message
     assert "- cyq_perf: 2 [2026-04-29, 2026-04-30]" in result.message
     assert "dry_run: no data fetched or promoted" in result.message
+
+
+def test_cli_provider_probe_loads_token_from_project_env(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = _write_storage_config(tmp_path)
+    (tmp_path / ".env").write_text("TUSHARE_TOKEN=file-token\n", encoding="utf-8")
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "file-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, **kwargs):
+            return pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "winner_rate": [88.0]}).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    exit_code = cli_main(
+        [
+            "provider",
+            "probe",
+            "--config",
+            str(config_path),
+            "--source",
+            "tushare",
+            "--api",
+            "cyq_perf",
+            "--ts-code",
+            "600519.SH",
+            "--trade-date",
+            "20260428",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "provider probe succeeded: cyq_perf" in output
+    assert "missing_expected_fields: none" in output
+
+
+def test_cli_provider_probe_prefers_environment_token(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = _write_storage_config(tmp_path)
+    (tmp_path / ".env").write_text("TUSHARE_TOKEN=file-token\n", encoding="utf-8")
+    monkeypatch.setenv("TUSHARE_TOKEN", "environment-token")
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "environment-token"
+            return FakePro()
+
+    class FakePro:
+        def cyq_perf(self, **kwargs):
+            return pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "winner_rate": [88.0]}).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    exit_code = cli_main(
+        [
+            "provider",
+            "probe",
+            "--config",
+            str(config_path),
+            "--source",
+            "tushare",
+            "--api",
+            "cyq_perf",
+            "--ts-code",
+            "600519.SH",
+            "--trade-date",
+            "20260428",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "provider probe succeeded: cyq_perf" in output
+
+
+def test_cli_provider_probe_reports_missing_token_without_env_file(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = _write_storage_config(tmp_path)
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+
+    exit_code = cli_main(
+        [
+            "provider",
+            "probe",
+            "--config",
+            str(config_path),
+            "--source",
+            "tushare",
+            "--api",
+            "cyq_perf",
+            "--ts-code",
+            "600519.SH",
+            "--trade-date",
+            "20260428",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "missing required environment variable: TUSHARE_TOKEN" in output
+
+
+def test_cli_sync_latest_loads_token_from_project_env(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_trading_calendar_current(tmp_path)
+    _write_daily_prices_current(tmp_path, [date(2026, 4, 28)])
+    _write_capital_flow_current(
+        tmp_path,
+        [
+            {
+                "symbol": "600519.SH",
+                "trade_date": date(2026, 4, 28),
+                "main_net_inflow_rate": 1.0,
+                "close_profit_ratio": 90.0,
+                "data_method": "tushare_cyq_perf",
+            }
+        ],
+    )
+    (tmp_path / ".env").write_text("TUSHARE_TOKEN=file-token\n", encoding="utf-8")
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+
+    class FakeTushare:
+        @staticmethod
+        def pro_api(token):
+            assert token == "file-token"
+            return FakePro()
+
+    class FakePro:
+        def trade_cal(self, exchange=None, start_date=None, end_date=None):
+            return pl.DataFrame(
+                {
+                    "exchange": ["SSE", "SSE", "SSE"],
+                    "cal_date": ["20260429", "20260430", "20260501"],
+                    "is_open": [1, 1, 0],
+                    "pretrade_date": ["20260428", "20260429", "20260430"],
+                }
+            ).to_pandas()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tushare", FakeTushare)
+
+    exit_code = cli_main(
+        [
+            "provider",
+            "sync-latest",
+            "--config",
+            str(config_path),
+            "--end-date",
+            "2026-05-01",
+            "--dry-run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "latest_trade_date: 2026-04-30" in output
+    assert "dry_run: no data fetched or promoted" in output
 
 
 def test_probe_provider_requires_tushare_token(monkeypatch) -> None:
