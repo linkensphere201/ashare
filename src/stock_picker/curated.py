@@ -41,6 +41,7 @@ RAW_TO_CURATED_DATASET = {
     "moneyflow_dc": "capital_flow_or_chip",
     "cyq_perf": "capital_flow_or_chip",
 }
+SUPPLEMENTAL_DAILY_PRICE_DATASETS = {"adj_factor", "daily_basic", "stk_limit"}
 
 
 def import_curated_csv(
@@ -192,6 +193,8 @@ def promote_raw_batch(
     schema = _load_registered_schema(config, curated_dataset)
     raw_frame = pl.read_csv(raw_path)
     mapped = _map_tushare_raw_to_curated(raw_frame, str(batch["dataset_name"]))
+    if batch["dataset_name"] in SUPPLEMENTAL_DAILY_PRICE_DATASETS:
+        mapped = _filter_to_existing_current_keys(config, curated_dataset, mapped, ["symbol", "trade_date"])
     now = datetime.now(UTC).isoformat(timespec="seconds")
     data_version = str(batch["business_date"] or now[:10])
     mapped = _enrich_frame(mapped, schema, source, str(batch["batch_id"]), data_version, now)
@@ -309,6 +312,7 @@ def _promote_suspend_batch(config: StorageConfig, batch: dict[str, object]) -> C
     daily_schema = _load_registered_schema(config, "daily_prices")
     risk_schema = _load_registered_schema(config, "risk_events")
     daily_frame = _map_tushare_raw_to_curated(raw_frame, "suspend_d")
+    daily_frame = _filter_to_existing_current_keys(config, "daily_prices", daily_frame, ["symbol", "trade_date"])
     risk_frame = _map_tushare_suspend_to_risk_events(raw_frame)
 
     daily_frame = _enrich_frame(daily_frame, daily_schema, str(batch["source"]), str(batch["batch_id"]), data_version, now)
@@ -870,6 +874,27 @@ def _merge_with_existing_current(
         if column not in primary_keys
     ]
     return combined.group_by(primary_keys, maintain_order=True).agg(aggregations)
+
+
+def _filter_to_existing_current_keys(
+    config: StorageConfig,
+    dataset_id: str,
+    frame: pl.DataFrame,
+    key_columns: list[str],
+) -> pl.DataFrame:
+    output_path = config.current_curated_root / dataset_id / "part-000.parquet"
+    if frame.is_empty() or not output_path.exists():
+        return frame.head(0)
+    join_keys = [f"__join_{column}" for column in key_columns]
+    left = frame.with_columns(
+        [pl.col(column).cast(pl.Utf8).alias(join_key) for column, join_key in zip(key_columns, join_keys, strict=True)]
+    )
+    existing_keys = (
+        pl.read_parquet(output_path)
+        .select([pl.col(column).cast(pl.Utf8).alias(join_key) for column, join_key in zip(key_columns, join_keys, strict=True)])
+        .unique()
+    )
+    return left.join(existing_keys, on=join_keys, how="inner").drop(join_keys)
 
 
 def _current_overlap_summary(

@@ -599,7 +599,19 @@ def test_promote_backtest_foundation_raw_datasets_merge_into_curated(tmp_path: P
     )
     write_raw_batch(config_path, "tushare", "daily_prices", daily, "2026-04-28")
     write_raw_batch(config_path, "tushare", "index_daily", index, "2026-04-28")
-    write_raw_batch(config_path, "tushare", "adj_factor", pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "adj_factor": [2.0]}), "2026-04-28")
+    write_raw_batch(
+        config_path,
+        "tushare",
+        "adj_factor",
+        pl.DataFrame(
+            {
+                "ts_code": ["600519.SH", "999999.SZ"],
+                "trade_date": ["20260428", "20260428"],
+                "adj_factor": [2.0, 1.0],
+            }
+        ),
+        "2026-04-28",
+    )
     write_raw_batch(config_path, "tushare", "daily_basic", pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "turnover_rate": [1.2]}), "2026-04-28")
     write_raw_batch(config_path, "tushare", "stk_limit", pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "up_limit": [11.22], "down_limit": [9.18]}), "2026-04-28")
     write_raw_batch(config_path, "tushare", "suspend_d", pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "suspend_type": ["S"]}), "2026-04-28")
@@ -1423,19 +1435,20 @@ def test_factor_exploration_computes_evaluates_and_backtests_candidate_002(tmp_p
                     "close_profit_ratio": 80.0 - symbol_index * 5.0 + index * 0.02,
                 }
             )
-    for index, trade_date in enumerate(dates):
-        close = 1000.0 + index
-        daily_rows.append(
-            {
-                "symbol": "000852.SH",
-                "trade_date": trade_date,
-                "asset_type": "index",
-                "open": close,
-                "close": close,
-                "amount": 1.0,
-                "adj_factor": None,
-            }
-        )
+    for benchmark_symbol, base_close in [("000852.SH", 1000.0), ("399006.SZ", 2000.0)]:
+        for index, trade_date in enumerate(dates):
+            close = base_close + index
+            daily_rows.append(
+                {
+                    "symbol": benchmark_symbol,
+                    "trade_date": trade_date,
+                    "asset_type": "index",
+                    "open": close,
+                    "close": close,
+                    "amount": 1.0,
+                    "adj_factor": None,
+                }
+            )
     pl.DataFrame(security_rows).write_parquet(security_path)
     pl.DataFrame(daily_rows).write_parquet(daily_path)
     pl.DataFrame(capital_rows).write_parquet(capital_path)
@@ -1491,10 +1504,12 @@ def test_factor_exploration_computes_evaluates_and_backtests_candidate_002(tmp_p
     assert "600519.SH" in ranking.message
     assert "000002.SZ" not in ranking.message
 
-    backtest = backtest_candidate_002(config_path, "factor_002_test", top=1, rebalance="weekly", benchmark_symbol="000852.SH")
+    backtest = backtest_candidate_002(config_path, "factor_002_test", top=1, rebalance="weekly", benchmark_symbol=["000852.SH", "399006.SZ"])
     assert backtest.ok
     assert "Strategy Candidate 002 backtest" in backtest.message
     assert "rebalance: weekly" in backtest.message
+    assert "benchmark_symbols: 000852.SH, 399006.SZ" in backtest.message
+    assert "399006.SZ" in backtest.message
     assert "sharpe_ratio:" in backtest.message
     assert "excess_return:" in backtest.message
 

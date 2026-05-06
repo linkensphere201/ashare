@@ -84,7 +84,7 @@ def backtest_candidate_001(
     snapshot_id: str,
     holding_days: int = 20,
     top: int = 10,
-    benchmark_symbol: str = "000852.SH",
+    benchmark_symbol: str | list[str] = "000852.SH",
 ) -> StrategyResult:
     config = load_storage_config(config_path)
     initialize_metadata_catalog(config.metadata_sqlite_path)
@@ -141,6 +141,7 @@ def backtest_candidate_001(
         holding_days=holding_days,
         benchmark_symbol=benchmark_symbol,
     )
+    benchmark_symbols = _normalize_benchmark_symbols(benchmark_symbol)
     display = backtest_rows.select(
         [
             pl.col("trade_date").alias("signal_date"),
@@ -180,11 +181,13 @@ def backtest_candidate_001(
                 f"sharpe_ratio: {_format_optional_float(portfolio_metrics.get('sharpe_ratio'))}",
                 f"max_drawdown: {_format_optional_float(portfolio_metrics.get('max_drawdown'))}",
                 f"calmar_ratio: {_format_optional_float(portfolio_metrics.get('calmar_ratio'))}",
-                f"benchmark_symbol: {benchmark_symbol}",
+                f"benchmark_symbol: {benchmark_symbols[0]}",
+                f"benchmark_symbols: {', '.join(benchmark_symbols)}",
                 f"benchmark_return: {_format_optional_float(portfolio_metrics.get('benchmark_return'))}",
                 f"excess_return: {_format_optional_float(portfolio_metrics.get('excess_return'))}",
                 f"tracking_error: {_format_optional_float(portfolio_metrics.get('tracking_error'))}",
                 f"information_ratio: {_format_optional_float(portfolio_metrics.get('information_ratio'))}",
+                f"benchmark_metrics: {json.dumps(portfolio_metrics.get('benchmark_metrics', {}), ensure_ascii=False, sort_keys=True)}",
                 f"turnover_proxy: {_format_optional_float(portfolio_metrics.get('turnover_proxy'))}",
                 f"holding_overlap: {_format_optional_float(portfolio_metrics.get('holding_overlap'))}",
                 f"monthly_returns: {portfolio_metrics.get('monthly_returns', '{}')}",
@@ -313,7 +316,7 @@ def _candidate_001_portfolio_metrics(
     daily: pl.DataFrame,
     backtest_rows: pl.DataFrame,
     holding_days: int,
-    benchmark_symbol: str,
+    benchmark_symbol: str | list[str],
 ) -> tuple[dict[str, object], list[str]]:
     warnings: list[str] = []
     portfolio = (
@@ -325,24 +328,26 @@ def _candidate_001_portfolio_metrics(
     metrics = _return_series_metrics(returns, periods_per_year=252 / holding_days)
     metrics.update(_turnover_and_overlap(portfolio))
 
-    benchmark_pairs, benchmark_warning = _benchmark_forward_returns(daily, portfolio, holding_days, benchmark_symbol)
-    if benchmark_warning:
-        warnings.append(benchmark_warning)
-    if benchmark_pairs:
-        matched_strategy_returns = [pair[0] for pair in benchmark_pairs]
-        benchmark_returns = [pair[1] for pair in benchmark_pairs]
-        metrics["benchmark_return"] = _compound_return(benchmark_returns)
-        strategy_return = _compound_return(matched_strategy_returns)
-        metrics["excess_return"] = strategy_return - float(metrics["benchmark_return"])
-        excess = [left - right for left, right in benchmark_pairs]
-        tracking_error = _sample_std(excess) * ((252 / holding_days) ** 0.5)
-        metrics["tracking_error"] = tracking_error
-        metrics["information_ratio"] = (sum(excess) / len(excess) * (252 / holding_days)) / tracking_error if tracking_error else None
+    benchmark_symbols = _normalize_benchmark_symbols(benchmark_symbol)
+    benchmark_metrics: dict[str, dict[str, float | None]] = {}
+    for symbol in benchmark_symbols:
+        symbol_metrics, benchmark_warning = _benchmark_relative_metrics(daily, portfolio, holding_days, symbol)
+        if benchmark_warning:
+            warnings.append(benchmark_warning)
+        benchmark_metrics[symbol] = symbol_metrics
+
+    primary_metrics = benchmark_metrics.get(benchmark_symbols[0], {}) if benchmark_symbols else {}
+    if primary_metrics:
+        metrics["benchmark_return"] = primary_metrics.get("benchmark_return")
+        metrics["excess_return"] = primary_metrics.get("excess_return")
+        metrics["tracking_error"] = primary_metrics.get("tracking_error")
+        metrics["information_ratio"] = primary_metrics.get("information_ratio")
     else:
         metrics["benchmark_return"] = None
         metrics["excess_return"] = None
         metrics["tracking_error"] = None
         metrics["information_ratio"] = None
+    metrics["benchmark_metrics"] = benchmark_metrics
 
     monthly_rows = portfolio.with_columns(pl.col("trade_date").dt.strftime("%Y-%m").alias("month"))
     monthly = {
@@ -354,6 +359,46 @@ def _candidate_001_portfolio_metrics(
     }
     metrics["monthly_returns"] = json.dumps(monthly, sort_keys=True)
     return metrics, warnings
+
+
+def _normalize_benchmark_symbols(benchmark_symbol: str | list[str]) -> list[str]:
+    if isinstance(benchmark_symbol, str):
+        values = [benchmark_symbol]
+    else:
+        values = benchmark_symbol
+    normalized = []
+    for value in values:
+        if value and value not in normalized:
+            normalized.append(value)
+    return normalized or ["000852.SH"]
+
+
+def _benchmark_relative_metrics(
+    daily: pl.DataFrame,
+    portfolio: pl.DataFrame,
+    holding_days: int,
+    benchmark_symbol: str,
+) -> tuple[dict[str, float | None], str | None]:
+    benchmark_pairs, benchmark_warning = _benchmark_forward_returns(daily, portfolio, holding_days, benchmark_symbol)
+    if not benchmark_pairs:
+        return {
+            "benchmark_return": None,
+            "excess_return": None,
+            "tracking_error": None,
+            "information_ratio": None,
+        }, benchmark_warning
+    matched_strategy_returns = [pair[0] for pair in benchmark_pairs]
+    benchmark_returns = [pair[1] for pair in benchmark_pairs]
+    benchmark_return = _compound_return(benchmark_returns)
+    strategy_return = _compound_return(matched_strategy_returns)
+    excess = [left - right for left, right in benchmark_pairs]
+    tracking_error = _sample_std(excess) * ((252 / holding_days) ** 0.5)
+    return {
+        "benchmark_return": benchmark_return,
+        "excess_return": strategy_return - benchmark_return,
+        "tracking_error": tracking_error,
+        "information_ratio": (sum(excess) / len(excess) * (252 / holding_days)) / tracking_error if tracking_error else None,
+    }, benchmark_warning
 
 
 def _benchmark_forward_returns(

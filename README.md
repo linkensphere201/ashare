@@ -83,10 +83,18 @@ copy config\providers.example.yaml config\providers.yaml
 copy config\rules.example.yaml config\rules.yaml
 ```
 
-Credentials are read from environment variables. For Tushare, set `TUSHARE_TOKEN` in the active shell before running provider commands:
+Provider CLI commands load credentials during the pre-run setup phase. Environment variables take precedence; if the variable is not set, the CLI reads the project `.env` resolved from `--config config/storage.yaml`.
+
+For Tushare, either set `TUSHARE_TOKEN` in the active shell:
 
 ```powershell
 $env:TUSHARE_TOKEN = "your-token-here"
+```
+
+Or put it in local `.env`:
+
+```text
+TUSHARE_TOKEN=your-token-here
 ```
 
 Do not print tokens in logs or commit them. `.env.example` is ignored in this workspace because it may contain local secret placeholders during development.
@@ -189,8 +197,8 @@ Supported first-pass Tushare datasets:
 Probe a small provider request before running larger fetches:
 
 ```powershell
-stock-picker provider probe --source tushare --api moneyflow_dc --ts-code 600519.SH --trade-date 20260428
-stock-picker provider probe --source tushare --api cyq_perf --ts-code 600519.SH --trade-date 20260428
+stock-picker provider probe --config config/storage.yaml --source tushare --api moneyflow_dc --ts-code 600519.SH --trade-date 20260428
+stock-picker provider probe --config config/storage.yaml --source tushare --api cyq_perf --ts-code 600519.SH --trade-date 20260428
 ```
 
 Fetch raw provider data:
@@ -216,6 +224,8 @@ stock-picker provider run-market-daily --config config/storage.yaml --run-id mar
 Start with a small `--max-tasks`. Increase it only after confirming the account's Tushare rate limits are safe. The command stores task state in `metadata.sqlite.provider_run_tasks`; raw batches are promoted later with `storage promote-raw`.
 
 `daily_prices` tasks are split by trading day. `moneyflow_dc` can hit Tushare's single-request row cap even for one trading day, so it is split by trading day plus active-symbol batches from current `security_master`; tune that with `--symbol-batch-size`.
+
+For full-market supplemental daily-price datasets such as `adj_factor`, `daily_basic`, and `stk_limit`, prefer date-sliced pulls and then promote a combined raw batch. These datasets are supplemental: promotion updates existing `daily_prices(symbol, trade_date)` rows and intentionally skips provider rows that do not already have base OHLCV data in `daily_prices`.
 
 Long runs emit periodic progress through Python standard logging on stdout. Tune the cadence with `--progress-every-tasks`; set it to `0` to disable progress lines.
 
@@ -311,6 +321,12 @@ stock-picker strategy backtest-candidate-001 --config config/storage.yaml --snap
 
 The backtest reports trade-level metrics plus first-pass portfolio diagnostics, including annualized return, annualized volatility, Sharpe ratio, maximum drawdown, Calmar ratio, benchmark return, excess return, tracking error, information ratio, turnover proxy, holding overlap, and monthly returns.
 
+Repeat `--benchmark-symbol` to compare against multiple benchmark indexes in one run:
+
+```powershell
+stock-picker strategy backtest-candidate-001 --config config/storage.yaml --snapshot-id snapshot_20260430_002 --holding-days 20 --top 10 --benchmark-symbol 000852.SH --benchmark-symbol 000300.SH --benchmark-symbol 399006.SZ
+```
+
 Strategy Candidate 002 uses the second-milestone Flow Momentum Quality factor table:
 
 - Momentum/trend score from adjusted prices
@@ -326,7 +342,7 @@ Compute a factor run, evaluate it, rank candidates, and backtest the Strategy 00
 stock-picker factor compute-daily --config config/storage.yaml --snapshot-id snapshot_20260428_001 --start-date 2026-01-01 --end-date 2026-04-28 --run-id factor_002_20260428
 stock-picker factor evaluate --config config/storage.yaml --factor-run-id factor_002_20260428 --forward-days 20
 stock-picker strategy rank-candidate-002 --config config/storage.yaml --factor-run-id factor_002_20260428 --trade-date 2026-04-28 --top 20
-stock-picker strategy backtest-candidate-002 --config config/storage.yaml --factor-run-id factor_002_20260428 --top 10 --rebalance weekly --benchmark-symbol 000852.SH
+stock-picker strategy backtest-candidate-002 --config config/storage.yaml --factor-run-id factor_002_20260428 --top 10 --rebalance weekly --benchmark-symbol 000852.SH --benchmark-symbol 000300.SH --benchmark-symbol 000905.SH --benchmark-symbol 399006.SZ --benchmark-symbol 000688.SH --benchmark-symbol 899050.BJ
 ```
 
 Factor exploration artifacts are written under `data/reports/factor_exploration/<factor_run_id>/` and are not registered as curated datasets.
@@ -385,7 +401,29 @@ Supported fetch datasets:
 security_master, trading_calendar, daily_prices, adj_factor, index_daily, daily_basic, stk_limit, suspend_d, moneyflow_dc, cyq_perf
 ```
 
-Provider commands read `TUSHARE_TOKEN` from the environment and never print the token.
+Provider commands load `TUSHARE_TOKEN` from the environment first, then from local `.env` via the configured project root, and never print the token.
+
+Current local foundation-data checkpoint from the second milestone:
+
+| Item | Value |
+| --- | --- |
+| Snapshot | `snapshot_20260430_002` |
+| Date window | `2025-04-14` to `2026-04-30` |
+| Stock daily rows | 1,385,534 |
+| Benchmark index rows | 1,530 rows across 6 indexes |
+| Supplemental coverage | Complete `adj_factor`, `turnover_rate`, `limit_up`, and `limit_down` for current stock daily rows |
+| Suspension flags | 701 stock-date rows from `suspend_d` |
+
+Benchmark index pool:
+
+| Index | Symbol | Role |
+| --- | --- | --- |
+| CSI 300 | `000300.SH` | Large-cap baseline |
+| CSI 500 | `000905.SH` | Mid-cap baseline |
+| CSI 1000 | `000852.SH` | Default small/mid-cap baseline |
+| ChiNext Index | `399006.SZ` | Growth-board baseline |
+| STAR 50 | `000688.SH` | STAR Market baseline |
+| BSE 50 | `899050.BJ` | Beijing Stock Exchange baseline |
 
 Check the latest provider trading day and show which standard-layer dates are missing without writing data:
 

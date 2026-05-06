@@ -115,7 +115,11 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_candidate_cmd.add_argument("--snapshot-id", required=True, help="Snapshot id")
     backtest_candidate_cmd.add_argument("--holding-days", type=int, default=20, help="Holding window in trading rows")
     backtest_candidate_cmd.add_argument("--top", type=int, default=10, help="Candidate count per signal date")
-    backtest_candidate_cmd.add_argument("--benchmark-symbol", default="000852.SH", help="Benchmark symbol for relative metrics")
+    backtest_candidate_cmd.add_argument(
+        "--benchmark-symbol",
+        action="append",
+        help="Benchmark symbol for relative metrics; repeat for multiple benchmarks. Defaults to 000852.SH.",
+    )
     backtest_candidate_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     rank_candidate_002_cmd = strategy_subparsers.add_parser(
@@ -134,7 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_candidate_002_cmd.add_argument("--factor-run-id", required=True, help="Factor run id from factor compute-daily")
     backtest_candidate_002_cmd.add_argument("--top", type=int, default=10, help="Candidate count per rebalance date")
     backtest_candidate_002_cmd.add_argument("--rebalance", choices=["daily", "weekly"], default="weekly", help="Rebalance frequency")
-    backtest_candidate_002_cmd.add_argument("--benchmark-symbol", default="000852.SH", help="Benchmark symbol for relative metrics")
+    backtest_candidate_002_cmd.add_argument(
+        "--benchmark-symbol",
+        action="append",
+        help="Benchmark symbol for relative metrics; repeat for multiple benchmarks. Defaults to 000852.SH.",
+    )
     backtest_candidate_002_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     fetch_cmd = provider_subparsers.add_parser("fetch", help="Fetch a raw provider dataset into the raw store")
@@ -579,7 +587,7 @@ def execute_command(args: argparse.Namespace, context: CliContext):
         return rank_candidate_001(context.config_path, args.snapshot_id, args.top)
 
     if args.command == "strategy" and args.strategy_command == "backtest-candidate-001":
-        return backtest_candidate_001(context.config_path, args.snapshot_id, args.holding_days, args.top, args.benchmark_symbol)
+        return backtest_candidate_001(context.config_path, args.snapshot_id, args.holding_days, args.top, args.benchmark_symbol or "000852.SH")
 
     if args.command == "strategy" and args.strategy_command == "rank-candidate-002":
         return rank_candidate_002(context.config_path, args.factor_run_id, args.trade_date, args.top)
@@ -590,7 +598,7 @@ def execute_command(args: argparse.Namespace, context: CliContext):
             factor_run_id=args.factor_run_id,
             top=args.top,
             rebalance=args.rebalance,
-            benchmark_symbol=args.benchmark_symbol,
+            benchmark_symbol=args.benchmark_symbol or "000852.SH",
         )
 
     if args.command == "factor" and args.factor_command == "research-candidate-001":

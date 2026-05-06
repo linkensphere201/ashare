@@ -198,7 +198,7 @@ def backtest_candidate_002(
     factor_run_id: str,
     top: int = 10,
     rebalance: str = "weekly",
-    benchmark_symbol: str = "000852.SH",
+    benchmark_symbol: str | list[str] = "000852.SH",
 ) -> FactorExplorationResult:
     if top <= 0:
         return FactorExplorationResult(False, "candidate 002 backtest failed; top must be positive")
@@ -226,6 +226,7 @@ def backtest_candidate_002(
         return FactorExplorationResult(True, f"Strategy Candidate 002 backtest found no complete {rebalance} holding rows", run_dir)
 
     metrics, warnings = _candidate_001_portfolio_metrics(daily, rows, holding_days, benchmark_symbol)
+    benchmark_symbols = benchmark_symbol if isinstance(benchmark_symbol, list) else [benchmark_symbol]
     trade_metrics = rows.select(
         [
             pl.len().alias("trade_count"),
@@ -268,8 +269,10 @@ def backtest_candidate_002(
         f"annual_volatility: {_format_optional_float(metrics.get('annual_volatility'))}",
         f"sharpe_ratio: {_format_optional_float(metrics.get('sharpe_ratio'))}",
         f"max_drawdown: {_format_optional_float(metrics.get('max_drawdown'))}",
-        f"benchmark_symbol: {benchmark_symbol}",
+        f"benchmark_symbol: {benchmark_symbols[0] if benchmark_symbols else '000852.SH'}",
+        f"benchmark_symbols: {', '.join(benchmark_symbols or ['000852.SH'])}",
         f"excess_return: {_format_optional_float(metrics.get('excess_return'))}",
+        f"benchmark_metrics: {json.dumps(metrics.get('benchmark_metrics', {}), ensure_ascii=False, sort_keys=True)}",
         "warnings: " + ("; ".join(warnings) if warnings else "none"),
         f"trades_artifact: {trades_path}",
         f"metrics_artifact: {metrics_path}",
