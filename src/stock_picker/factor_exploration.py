@@ -120,7 +120,7 @@ def evaluate_factor_run(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     factors = pl.read_csv(factors_path, try_parse_dates=True)
     daily_path = Path(metadata["dataset_paths"]["daily_prices"])
-    daily = pl.read_parquet(daily_path)
+    daily = _with_date_column(pl.read_parquet(daily_path), "trade_date")
     evaluation = _factor_evaluation_frames(factors, daily, forward_days, groups)
 
     summary_path = run_dir / "evaluation_summary.json"
@@ -207,7 +207,7 @@ def backtest_candidate_002(
 
     factors, run_dir = _load_factor_run(config_path, factor_run_id)
     metadata = json.loads((run_dir / "factor_run_metadata.json").read_text(encoding="utf-8"))
-    daily = pl.read_parquet(Path(metadata["dataset_paths"]["daily_prices"]))
+    daily = _with_date_column(pl.read_parquet(Path(metadata["dataset_paths"]["daily_prices"])), "trade_date")
     holding_days = 1 if rebalance == "daily" else 5
     signal_dates = _rebalance_dates(factors, rebalance)
     ranked = (
@@ -287,6 +287,10 @@ def _compute_factor_frame(
     start_date: str,
     end_date: str,
 ) -> pl.DataFrame:
+    daily = _with_date_column(daily, "trade_date")
+    capital = _with_date_column(capital, "trade_date")
+    if "list_date" in security.columns:
+        security = _with_date_column(security, "list_date")
     daily_stock = _with_adjusted_prices(daily).filter(pl.col("asset_type").fill_null("stock") != "index")
     price = (
         daily_stock.sort(["symbol", "trade_date"])
@@ -334,6 +338,12 @@ def _compute_factor_frame(
     )
     base = _ensure_factor_input_columns(base)
     return _score_factor_frame(base)
+
+
+def _with_date_column(frame: pl.DataFrame, column: str) -> pl.DataFrame:
+    if column not in frame.columns:
+        return frame
+    return frame.with_columns(pl.col(column).cast(pl.Utf8).str.strptime(pl.Date, "%Y-%m-%d", strict=False).alias(column))
 
 
 def _score_factor_frame(frame: pl.DataFrame) -> pl.DataFrame:
