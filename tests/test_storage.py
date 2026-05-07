@@ -2438,6 +2438,11 @@ def test_sync_latest_dry_run_reports_missing_dates(tmp_path: Path, monkeypatch) 
     assert "- daily_prices: 2 [2026-04-29, 2026-04-30]" in result.message
     assert "- moneyflow_dc: 2 [2026-04-29, 2026-04-30]" in result.message
     assert "- cyq_perf: 2 [2026-04-29, 2026-04-30]" in result.message
+    assert "- adj_factor: 2 [2026-04-29, 2026-04-30]" in result.message
+    assert "- daily_basic: 2 [2026-04-29, 2026-04-30]" in result.message
+    assert "- stk_limit: 2 [2026-04-29, 2026-04-30]" in result.message
+    assert "- suspend_d: 2 [2026-04-29, 2026-04-30]" in result.message
+    assert "- index_daily: 2 [2026-04-29, 2026-04-30]" in result.message
     assert "dry_run: no data fetched or promoted" in result.message
 
 

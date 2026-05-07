@@ -23,8 +23,19 @@ class SyncLatestResult:
     message: str
 
 
-DEFAULT_SYNC_DATASETS = ["daily_prices", "moneyflow_dc", "cyq_perf"]
+DEFAULT_BENCHMARK_SYMBOLS = ["000852.SH", "000300.SH", "000905.SH", "399006.SZ", "000688.SH", "899050.BJ"]
+DEFAULT_SYNC_DATASETS = [
+    "daily_prices",
+    "moneyflow_dc",
+    "cyq_perf",
+    "adj_factor",
+    "daily_basic",
+    "stk_limit",
+    "suspend_d",
+    "index_daily",
+]
 MARKET_SYNC_DATASETS = {"daily_prices", "moneyflow_dc"}
+SUPPLEMENTAL_SYNC_DATASETS = {"adj_factor", "daily_basic", "stk_limit", "suspend_d"}
 SUPPORTED_SYNC_DATASETS = set(DEFAULT_SYNC_DATASETS)
 
 
@@ -48,6 +59,7 @@ def sync_latest(
     backoff_multiplier: float = 2.0,
     create_snapshot_after: bool = False,
     token_env: str = "TUSHARE_TOKEN",
+    benchmark_symbols: list[str] | None = None,
     progress_every_tasks: int = 50,
     progress_every_batches: int = 1,
     progress_callback=None,
@@ -71,6 +83,7 @@ def sync_latest(
     token = os.environ.get(token_env)
     if not token:
         return SyncLatestResult(False, f"missing required environment variable: {token_env}")
+    selected_benchmark_symbols = benchmark_symbols or DEFAULT_BENCHMARK_SYMBOLS
     initialize_metadata_catalog(config.metadata_sqlite_path)
     today = end_date or date.today().isoformat()
     calendar_start = _calendar_fetch_start(config.current_curated_root / "trading_calendar" / "part-000.parquet", today, calendar_lookback_days)
@@ -102,7 +115,7 @@ def sync_latest(
         return SyncLatestResult(True, f"latest_trade_date: {latest_trade_date}\nno trading dates to inspect from {selected_start}")
 
     missing_by_dataset = {
-        dataset: _missing_dates_for_dataset(config.current_curated_root, dataset, trading_window)
+        dataset: _missing_dates_for_dataset(config.current_curated_root, dataset, trading_window, selected_benchmark_symbols)
         for dataset in selected_datasets
     }
     lines = [
@@ -195,6 +208,34 @@ def sync_latest(
         if not cyq_promote.ok:
             return SyncLatestResult(False, "\n".join(lines))
 
+    for dataset in [value for value in selected_datasets if value in SUPPLEMENTAL_SYNC_DATASETS and missing_by_dataset[value]]:
+        result = _sync_range_dataset(
+            config_path=config_path,
+            source=source,
+            token=token,
+            dataset=dataset,
+            missing_dates=missing_by_dataset[dataset],
+            as_of_date=latest_trade_date,
+        )
+        lines.append(result.message)
+        if not result.ok:
+            return SyncLatestResult(False, "\n".join(lines))
+
+    if "index_daily" in selected_datasets and missing_by_dataset.get("index_daily"):
+        for symbol in selected_benchmark_symbols:
+            result = _sync_range_dataset(
+                config_path=config_path,
+                source=source,
+                token=token,
+                dataset="index_daily",
+                missing_dates=missing_by_dataset["index_daily"],
+                as_of_date=latest_trade_date,
+                ts_code=symbol,
+            )
+            lines.append(result.message)
+            if not result.ok:
+                return SyncLatestResult(False, "\n".join(lines))
+
     quality = check_curated_quality(config_path)
     lines.append(quality.message)
     if not quality.ok:
@@ -270,23 +311,125 @@ def _default_sync_start(current_root: Path, datasets: list[str], calendar_dates:
 
 
 def _latest_covered_date(current_root: Path, dataset: str) -> str | None:
-    dates = _covered_dates_for_dataset(current_root, dataset)
+    dates = _covered_dates_for_dataset(current_root, dataset, DEFAULT_BENCHMARK_SYMBOLS)
     return max(dates) if dates else None
 
 
-def _missing_dates_for_dataset(current_root: Path, dataset: str, trading_window: list[str]) -> list[str]:
-    covered = _covered_dates_for_dataset(current_root, dataset)
+def _missing_dates_for_dataset(current_root: Path, dataset: str, trading_window: list[str], benchmark_symbols: list[str] | None = None) -> list[str]:
+    covered = _covered_dates_for_dataset(current_root, dataset, benchmark_symbols or DEFAULT_BENCHMARK_SYMBOLS)
     return [value for value in trading_window if value not in covered]
 
 
-def _covered_dates_for_dataset(current_root: Path, dataset: str) -> set[str]:
+def _covered_dates_for_dataset(current_root: Path, dataset: str, benchmark_symbols: list[str]) -> set[str]:
     if dataset == "daily_prices":
-        return _dates_from_parquet(current_root / "daily_prices" / "part-000.parquet")
+        return _dates_from_daily_prices(current_root / "daily_prices" / "part-000.parquet", asset_type="stock")
+    if dataset == "index_daily":
+        return _dates_from_index_daily(current_root / "daily_prices" / "part-000.parquet", benchmark_symbols)
+    if dataset == "adj_factor":
+        return _dates_from_daily_price_field(current_root / "daily_prices" / "part-000.parquet", "adj_factor")
+    if dataset == "daily_basic":
+        return _dates_from_daily_price_field(current_root / "daily_prices" / "part-000.parquet", "turnover_rate")
+    if dataset == "stk_limit":
+        return _dates_from_daily_price_field(current_root / "daily_prices" / "part-000.parquet", "limit_up")
+    if dataset == "suspend_d":
+        return _dates_from_daily_price_field(current_root / "daily_prices" / "part-000.parquet", "is_suspended")
     if dataset == "moneyflow_dc":
         return _dates_from_capital_flow(current_root / "capital_flow_or_chip" / "part-000.parquet", "moneyflow_dc")
     if dataset == "cyq_perf":
         return _dates_from_capital_flow(current_root / "capital_flow_or_chip" / "part-000.parquet", "cyq_perf")
     return set()
+
+
+def _sync_range_dataset(
+    config_path: Path,
+    source: str,
+    token: str,
+    dataset: str,
+    missing_dates: list[str],
+    as_of_date: str,
+    ts_code: str | None = None,
+) -> SyncLatestResult:
+    if not missing_dates:
+        return SyncLatestResult(True, f"{dataset}: no missing dates")
+    start_date = missing_dates[0]
+    end_date = missing_dates[-1]
+    label = f"{dataset}" + (f"/{ts_code}" if ts_code else "")
+    try:
+        frame = _fetch_tushare_dataset(
+            token=token,
+            dataset=dataset,
+            start_date=start_date,
+            end_date=end_date,
+            ts_code=ts_code,
+            trade_date=None,
+        )
+    except ModuleNotFoundError:
+        return SyncLatestResult(False, f"{label}: missing dependency: install tushare to fetch provider data")
+    except Exception as error:
+        return SyncLatestResult(False, f"{label}: provider fetch failed: {error}")
+    batch = write_raw_batch(
+        config_path=config_path,
+        source=source,
+        dataset=dataset,
+        frame=frame,
+        as_of_date=as_of_date,
+    )
+    if not batch.ok:
+        return SyncLatestResult(False, f"{label}: {batch.message}")
+    promote = promote_raw_batch(
+        config_path=config_path,
+        source=source,
+        dataset=dataset,
+        batch_id=batch.batch_id,
+    )
+    if not promote.ok:
+        return SyncLatestResult(False, f"{label}: {promote.message}")
+    return SyncLatestResult(True, f"{label}: fetched {start_date}..{end_date} rows={batch.row_count}; {promote.message}")
+
+
+def _dates_from_daily_prices(path: Path, asset_type: str) -> set[str]:
+    if not path.exists():
+        return set()
+    frame = pl.read_parquet(path)
+    if "trade_date" not in frame.columns:
+        return set()
+    frame = frame.with_columns(pl.col("trade_date").cast(pl.Date).alias("trade_date"))
+    if "asset_type" in frame.columns:
+        frame = frame.filter(pl.col("asset_type").fill_null("stock") == asset_type)
+    return {value.isoformat() for value in frame.select("trade_date").drop_nulls().unique().to_series().to_list()}
+
+
+def _dates_from_daily_price_field(path: Path, field: str, allow_false: bool = False) -> set[str]:
+    if not path.exists():
+        return set()
+    frame = pl.read_parquet(path)
+    if "trade_date" not in frame.columns or field not in frame.columns:
+        return set()
+    frame = frame.with_columns(pl.col("trade_date").cast(pl.Date).alias("trade_date"))
+    if "asset_type" in frame.columns:
+        frame = frame.filter(pl.col("asset_type").fill_null("stock") == "stock")
+    predicate = pl.col(field).is_not_null()
+    if allow_false:
+        predicate = predicate & (pl.col(field).cast(pl.Boolean, strict=False) == False)
+    dates = frame.filter(predicate).select("trade_date").drop_nulls().unique()
+    return {value.isoformat() for value in dates.to_series().to_list()}
+
+
+def _dates_from_index_daily(path: Path, benchmark_symbols: list[str]) -> set[str]:
+    if not path.exists():
+        return set()
+    frame = pl.read_parquet(path)
+    if "trade_date" not in frame.columns or "symbol" not in frame.columns:
+        return set()
+    frame = frame.with_columns(pl.col("trade_date").cast(pl.Date).alias("trade_date"))
+    if "asset_type" in frame.columns:
+        frame = frame.filter(pl.col("asset_type") == "index")
+    if benchmark_symbols:
+        frame = frame.filter(pl.col("symbol").is_in(benchmark_symbols))
+    counts = frame.group_by("trade_date").agg(pl.col("symbol").n_unique().alias("symbol_count"))
+    required = len(set(benchmark_symbols))
+    dates = counts.filter(pl.col("symbol_count") >= required).select("trade_date")
+    return {value.isoformat() for value in dates.to_series().to_list()}
 
 
 def _dates_from_parquet(path: Path) -> set[str]:

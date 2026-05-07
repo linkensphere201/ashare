@@ -259,6 +259,11 @@ def build_parser() -> argparse.ArgumentParser:
     sync_latest_cmd.add_argument("--max-cyq-batches", type=int, default=100000, help="Maximum cyq_perf symbol batches to execute")
     sync_latest_cmd.add_argument("--cyq-batch-size", type=int, default=100, help="Symbols per cyq_perf task")
     sync_latest_cmd.add_argument("--cyq-requests-per-minute", type=float, default=180.0, help="cyq_perf provider request rate limit")
+    sync_latest_cmd.add_argument(
+        "--benchmark-symbol",
+        action="append",
+        help="Benchmark index symbol to sync for index_daily; repeat for multiple symbols.",
+    )
     sync_latest_cmd.add_argument("--retry", type=int, default=3, help="Retries per task after the first attempt")
     sync_latest_cmd.add_argument("--retry-wait-seconds", type=float, default=60.0, help="Initial retry wait")
     sync_latest_cmd.add_argument("--backoff-multiplier", type=float, default=2.0, help="Retry wait multiplier")
@@ -578,6 +583,7 @@ def execute_command(args: argparse.Namespace, context: CliContext):
             backoff_multiplier=args.backoff_multiplier,
             create_snapshot_after=args.create_snapshot,
             token_env=args.token_env,
+            benchmark_symbols=args.benchmark_symbol,
             progress_every_tasks=args.progress_every_tasks,
             progress_every_batches=args.progress_every_batches,
             progress_callback=progress_logger.info,
