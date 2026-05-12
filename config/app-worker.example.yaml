@@ -1,0 +1,6 @@
+app_base_url: http://127.0.0.1:3000
+worker_id: local-worker
+worker_token_env: STOCK_APP_WORKER_TOKEN
+poll_interval_seconds: 15
+default_factor_run_id:
+default_trade_date:

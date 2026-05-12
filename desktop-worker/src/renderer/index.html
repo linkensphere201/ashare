@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stock Picker Console</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">SP</div>
+        <div>
+          <h1>Stock Picker</h1>
+          <p>Local Console</p>
+        </div>
+      </div>
+      <nav>
+        <button class="nav active" data-view="home">Home</button>
+        <button class="nav" data-view="sync">Sync</button>
+        <button class="nav" data-view="report">Report</button>
+        <button class="nav" data-view="analysis">Stock Analysis</button>
+        <button class="nav" data-view="worker">Worker</button>
+        <button class="nav" data-view="logs">Logs</button>
+        <button class="nav" data-view="settings">Settings</button>
+      </nav>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <h2 id="view-title">Home</h2>
+          <p id="view-subtitle">Local workflow status and latest outputs.</p>
+        </div>
+        <button id="stop-command" class="danger">Stop Current Task</button>
+      </header>
+
+      <section id="home" class="view active">
+        <div class="metrics">
+          <div class="panel"><span>Runtime</span><strong id="runtime-state">Idle</strong></div>
+          <div class="panel"><span>Latest workflow</span><strong id="latest-workflow">None</strong></div>
+          <div class="panel"><span>Worker queue</span><strong>Mock ready</strong></div>
+        </div>
+        <div class="panel wide">
+          <h3>Recent workflow status</h3>
+          <button data-command="workflow-status">Refresh</button>
+          <pre id="status-output"></pre>
+        </div>
+      </section>
+
+      <section id="sync" class="view">
+        <div class="panel wide">
+          <h3>Sync latest and generate report</h3>
+          <div class="form-grid">
+            <label>Start date <input id="sync-start" placeholder="2026-01-01" /></label>
+            <label>End date <input id="sync-end" placeholder="2026-05-12" /></label>
+            <label>Factor run id <input id="sync-factor-run" placeholder="optional" /></label>
+            <label>Top N <input id="sync-top" type="number" value="20" /></label>
+          </div>
+          <div class="actions">
+            <button data-command="sync-dry-run">Preflight</button>
+            <button data-command="sync-confirm">Run confirmed workflow</button>
+          </div>
+          <p class="hint">Real sync is blocked behind preflight and explicit confirmation.</p>
+        </div>
+      </section>
+
+      <section id="report" class="view">
+        <div class="panel wide">
+          <h3>Build publish artifact</h3>
+          <div class="form-grid">
+            <label>Factor run id <input id="report-factor-run" /></label>
+            <label>Trade date <input id="report-date" placeholder="optional" /></label>
+            <label>Output path <input id="report-output" placeholder="optional" /></label>
+            <label>Top N <input id="report-top" type="number" value="20" /></label>
+          </div>
+          <div class="actions">
+            <button data-command="build-artifact">Build artifact</button>
+            <button data-command="mock-upload">Manual upload to mock API</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="analysis" class="view">
+        <div class="panel wide">
+          <h3>Specific-stock analysis</h3>
+          <div class="form-grid">
+            <label>Symbol <input id="analysis-symbol" placeholder="600519.SH" /></label>
+            <label>Factor run id <input id="analysis-factor-run" /></label>
+            <label>Trade date <input id="analysis-date" placeholder="optional" /></label>
+          </div>
+          <button data-command="stock-analysis">Analyze stock</button>
+        </div>
+      </section>
+
+      <section id="worker" class="view">
+        <div class="panel wide">
+          <h3>Remote task worker</h3>
+          <div class="form-grid">
+            <label>Worker config <input id="worker-config" value="config/app-worker.yaml" /></label>
+            <label>Mock task path <input id="mock-task" placeholder="optional mock task json" /></label>
+          </div>
+          <div class="actions">
+            <button data-command="worker-once">Run once</button>
+            <button data-command="worker-loop">Run loop once</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="logs" class="view">
+        <div class="panel wide">
+          <h3>Logs</h3>
+          <pre id="log-output"></pre>
+        </div>
+      </section>
+
+      <section id="settings" class="view">
+        <div class="panel wide">
+          <h3>Local settings</h3>
+          <div class="form-grid">
+            <label>Storage config <input id="storage-config" value="config/storage.yaml" /></label>
+            <label>App base URL <input value="http://127.0.0.1:3000" /></label>
+            <label>Worker token env <input value="STOCK_APP_WORKER_TOKEN" /></label>
+            <label>Poll interval seconds <input type="number" value="15" /></label>
+          </div>
+          <p class="hint">Settings are displayed here for the first version. Runtime config remains in local YAML/env files.</p>
+        </div>
+      </section>
+    </main>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

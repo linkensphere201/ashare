@@ -1,0 +1,88 @@
+# Stock Picker Desktop Worker
+
+Electron shell for the local Stock Picker console.
+
+The desktop app does not implement research logic directly. It starts the Python
+`stock_picker.cli` module and streams command output back into the UI.
+
+## Development
+
+From this directory:
+
+```powershell
+npm install
+npm run dev
+```
+
+The app expects the Python project to be installed in the parent repository
+environment. If `.venv` exists, it uses `.venv\Scripts\python.exe`; otherwise it
+falls back to `python`.
+
+## Runtime Config
+
+Copy the worker config example in the parent repository:
+
+```powershell
+copy ..\config\app-worker.example.yaml ..\config\app-worker.yaml
+```
+
+Set the worker token through the environment or `.env`:
+
+```text
+STOCK_APP_WORKER_TOKEN=your-worker-token
+```
+
+## Unit Test Plan
+
+The desktop console has two layers:
+
+- Python runtime: publish artifact, stock analysis, workflow state, and worker claim/result handling.
+- Electron shell: tray/window UI, Python command launching, log streaming, and notification wiring.
+
+Unit tests should cover the Python runtime with synthetic factor-run fixtures and mock worker tasks. They must not call the real Tushare provider or a real stock-app backend.
+
+Required Python scenarios:
+
+- Publish artifact success, required-section validation, prohibited wording, sensitive-field rejection, change labels, invalid `top`, missing factor run, and empty factor CSV.
+- Stock analysis success, missing symbol, missing factor run, empty factor CSV, risk notes, and no local absolute paths or investment-advice wording in output.
+- Worker `run-once` success for `stock_analysis` and `report_update`, UTF-8 BOM mock JSON, unsupported request types, missing `factor_run_id`, and missing HTTP worker token.
+- Workflow status, pause, failed step state, dry-run preflight requiring confirmation, JSON events, and resume behavior that skips completed steps.
+- CLI help smoke for `publish`, `analysis`, `workflow`, and `app-worker`.
+
+Electron checks should stay lightweight in unit test runs:
+
+```powershell
+npm.cmd run check
+```
+
+This performs syntax checks for the Electron main and preload scripts without launching the GUI.
+
+## Manual Smoke Flow
+
+Run Python desktop-console tests from the parent repository:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_desktop_console.py --basetemp E:\projects\project-manager\.tmp-stock-tests\pytest-desktop -o cache_dir=E:\projects\project-manager\.tmp-stock-tests\pytest-cache-desktop
+```
+
+Run the full Python test suite:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest --basetemp E:\projects\project-manager\.tmp-stock-tests\pytest-full -o cache_dir=E:\projects\project-manager\.tmp-stock-tests\pytest-cache-full
+```
+
+Run Electron syntax checks from this directory:
+
+```powershell
+npm.cmd run check
+```
+
+Optional local smoke against an existing Candidate 002 factor run:
+
+```powershell
+.\.venv\Scripts\python.exe -m stock_picker.cli publish build-report-artifact --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --top 5
+.\.venv\Scripts\python.exe -m stock_picker.cli analysis stock --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --symbol 600519.SH
+.\.venv\Scripts\python.exe -m stock_picker.cli workflow stock-analysis --config config/storage.yaml --workflow-id smoke_stock_analysis --factor-run-id factor_002_latest_20260506 --symbol 600519.SH --trade-date 2026-05-06 --json-events
+```
+
+The optional smoke reads local reports only. It should not run real provider syncs or upload to a real backend.

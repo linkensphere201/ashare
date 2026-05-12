@@ -1,0 +1,449 @@
+from __future__ import annotations
+
+import json
+from datetime import date
+from pathlib import Path
+import sys
+
+import polars as pl
+import pytest
+
+from stock_picker.cli import main as cli_main
+from stock_picker.analysis import analyze_stock
+from stock_picker.app_worker import run_worker_once
+from stock_picker.publish import build_report_artifact, validate_publish_artifact
+from stock_picker.storage import init_storage
+from stock_picker.workflow import pause_workflow, stock_analysis_workflow, sync_report_workflow, workflow_status
+
+
+def test_candidate_002_publish_artifact_and_stock_analysis(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+
+    publish = build_report_artifact(config_path, "factor_002_test", trade_date="2026-04-28", top=2)
+
+    assert publish.ok
+    assert publish.artifact_path is not None
+    artifact = json.loads(publish.artifact_path.read_text(encoding="utf-8"))
+    assert validate_publish_artifact(artifact) == []
+    assert artifact["publish_metadata"]["schema_version"] == "stock_app_publish_v001"
+    assert artifact["candidate_pool"]["count"] == 2
+    assert artifact["candidate_pool"]["items"][0]["symbol"] == "600519.SH"
+    assert "artifact_hash" in artifact["publish_metadata"]
+    assert str(tmp_path) not in json.dumps(artifact, ensure_ascii=False)
+
+    analysis = analyze_stock(config_path, "600519.SH", "factor_002_test", trade_date="2026-04-28")
+
+    assert analysis.ok
+    assert analysis.artifact_path is not None
+    payload = json.loads(analysis.artifact_path.read_text(encoding="utf-8"))
+    assert payload["analysis_metadata"]["schema_version"] == "stock_app_stock_analysis_v001"
+    assert payload["candidate_status"]["in_latest_candidate_pool"] is True
+    assert "买入" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_stock_analysis_handles_missing_symbol(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+
+    result = analyze_stock(config_path, "000000.SZ", "factor_002_test", trade_date="2026-04-28")
+
+    assert result.ok
+    assert result.artifact is not None
+    assert result.artifact["candidate_status"]["exclusion_reason"] == "not_found_in_factor_run"
+
+
+def test_publish_artifact_validation_rejects_missing_sections_and_unsafe_text() -> None:
+    errors = validate_publish_artifact(
+        {
+            "publish_metadata": {"schema_version": "stock_app_publish_v001"},
+            "market_summary": {"summary_text": "可以买入"},
+            "candidate_pool": {},
+            "stock_cards": [{"local_path": "C:/secret", "raw_payload": {"x": 1}}],
+            "factor_definitions": [],
+            "factor_explanations": [],
+            "backtest_summary": {},
+        }
+    )
+
+    assert "missing section: data_quality" in errors
+    assert "prohibited wording: 买入" in errors
+    assert "forbidden sensitive field: raw_payload" in errors
+
+
+def test_publish_artifact_change_labels_from_previous_artifact(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+    previous = tmp_path / "previous.json"
+    previous.write_text(
+        json.dumps(
+            {
+                "candidate_pool": {
+                    "items": [
+                        {"symbol": "600519.SH", "rank": 2},
+                        {"symbol": "000001.SZ", "rank": 1},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = build_report_artifact(config_path, "factor_002_test", trade_date="2026-04-28", previous_artifact_path=previous, top=2)
+
+    assert result.ok
+    assert result.artifact is not None
+    changes = {item["symbol"]: item["change_status"] for item in result.artifact["candidate_pool"]["items"]}
+    assert changes == {"600519.SH": "upgraded", "000001.SZ": "downgraded"}
+
+
+def test_publish_artifact_rejects_invalid_inputs_and_empty_factor_run(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+
+    assert not build_report_artifact(config_path, "missing", top=1).ok
+    assert not build_report_artifact(config_path, "missing", top=0).ok
+
+    _write_factor_run(tmp_path, "empty_factor")
+    run_dir = tmp_path / "data" / "reports" / "factor_exploration" / "empty_factor"
+    (run_dir / "stock_factors_daily.csv").write_text("symbol,trade_date,total_score,tradable_flag\n", encoding="utf-8")
+
+    result = build_report_artifact(config_path, "empty_factor", top=1)
+
+    assert not result.ok
+    assert "factor run has no rows" in result.message
+
+
+def test_stock_analysis_rejects_missing_and_empty_factor_run(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+
+    assert not analyze_stock(config_path, "600519.SH", "missing").ok
+
+    _write_factor_run(tmp_path, "empty_factor")
+    run_dir = tmp_path / "data" / "reports" / "factor_exploration" / "empty_factor"
+    (run_dir / "stock_factors_daily.csv").write_text("symbol,trade_date,total_score,tradable_flag\n", encoding="utf-8")
+
+    result = analyze_stock(config_path, "600519.SH", "empty_factor")
+
+    assert not result.ok
+    assert "factor run has no rows" in result.message
+
+
+def test_stock_analysis_surfaces_risk_notes_and_avoids_sensitive_output(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+
+    result = analyze_stock(config_path, "300001.SZ", "factor_002_test", trade_date="2026-04-28")
+
+    assert result.ok
+    assert result.artifact is not None
+    text = json.dumps(result.artifact, ensure_ascii=False)
+    assert "low_liquidity" in result.artifact["risk_notes"]
+    assert "Recent volatility or drawdown score is weak." in result.artifact["risk_notes"]
+    assert str(tmp_path) not in text
+    assert "买入" not in text
+
+
+def test_worker_run_once_processes_mock_stock_analysis(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("default_factor_run_id: factor_002_test\n", encoding="utf-8")
+    mock_task = tmp_path / "task.json"
+    mock_task.write_text(
+        json.dumps(
+            {
+                "analysis_request": {
+                    "id": "request_001",
+                    "request_type": "stock_analysis",
+                    "symbol": "600519.SH",
+                    "report_date": "2026-04-28",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_worker_once(config_path, worker_config, mock_task)
+
+    assert result.ok
+    response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
+    assert response["status"] == "completed"
+    assert response["result_artifact_json"]["stock"]["symbol"] == "600519.SH"
+
+
+def test_worker_run_once_processes_mock_report_update_and_bom_json(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("default_factor_run_id: factor_002_test\n", encoding="utf-8")
+    mock_task = tmp_path / "task.json"
+    mock_task.write_text(
+        "\ufeff" + json.dumps({"analysis_request": {"id": "request_002", "request_type": "report_update", "report_date": "2026-04-28"}}),
+        encoding="utf-8",
+    )
+
+    result = run_worker_once(config_path, worker_config, mock_task)
+
+    assert result.ok
+    response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
+    assert response["status"] == "completed"
+    assert response["result_artifact_json"]["publish_metadata"]["schema_version"] == "stock_app_publish_v001"
+
+
+def test_worker_run_once_writes_failed_mock_results(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("", encoding="utf-8")
+    mock_task = tmp_path / "task.json"
+    mock_task.write_text(json.dumps({"analysis_request": {"id": "request_003", "request_type": "unknown"}}), encoding="utf-8")
+
+    result = run_worker_once(config_path, worker_config, mock_task)
+
+    assert not result.ok
+    response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
+    assert response["status"] == "failed"
+    assert "unsupported request_type" in response["error_message"]
+
+
+def test_worker_run_once_requires_factor_run_id_for_mock_task(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("", encoding="utf-8")
+    mock_task = tmp_path / "task.json"
+    mock_task.write_text(json.dumps({"analysis_request": {"id": "request_004", "request_type": "stock_analysis", "symbol": "600519.SH"}}), encoding="utf-8")
+
+    result = run_worker_once(config_path, worker_config, mock_task)
+
+    assert not result.ok
+    response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
+    assert "requires factor_run_id" in response["error_message"]
+
+
+def test_worker_run_once_reports_missing_http_token(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("worker_token_env: TEST_STOCK_WORKER_TOKEN\n", encoding="utf-8")
+    monkeypatch.delenv("TEST_STOCK_WORKER_TOKEN", raising=False)
+
+    result = run_worker_once(config_path, worker_config)
+
+    assert not result.ok
+    assert "missing required environment variable: TEST_STOCK_WORKER_TOKEN" in result.message
+
+
+def test_workflow_status_pause_and_stock_analysis(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+
+    result = stock_analysis_workflow(config_path, symbol="600519.SH", factor_run_id="factor_002_test", workflow_id="wf_stock", trade_date="2026-04-28")
+
+    assert result.ok
+    status = workflow_status(config_path, "wf_stock")
+    assert status.ok
+    assert '"status": "completed"' in status.message
+    paused = pause_workflow(config_path, "wf_stock")
+    assert paused.ok
+    assert '"status": "paused"' in workflow_status(config_path, "wf_stock").message
+
+
+def test_workflow_resume_skips_completed_steps_and_emits_events(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+    events: list[dict[str, object]] = []
+
+    first = stock_analysis_workflow(config_path, symbol="600519.SH", factor_run_id="factor_002_test", workflow_id="wf_resume", trade_date="2026-04-28", emit=events.append)
+    second = stock_analysis_workflow(config_path, symbol="600519.SH", factor_run_id="factor_002_test", workflow_id="wf_resume", trade_date="2026-04-28", emit=events.append)
+
+    assert first.ok
+    assert second.ok
+    event_names = [event["event"] for event in events]
+    assert "step_started" in event_names
+    assert "step_completed" in event_names
+    assert "step_skipped" in event_names
+
+
+def test_workflow_failed_step_records_state(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+
+    result = stock_analysis_workflow(config_path, symbol="600519.SH", factor_run_id="missing", workflow_id="wf_failed", trade_date="2026-04-28")
+
+    assert not result.ok
+    status = json.loads(workflow_status(config_path, "wf_failed").message)
+    assert status["status"] == "failed"
+    assert status["steps"]["analyze_stock"]["status"] == "failed"
+    assert status["errors"]
+
+
+def test_sync_report_workflow_dry_run_requires_confirmation(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_trading_calendar_current(tmp_path)
+    _write_daily_prices_current(tmp_path, [date(2026, 4, 28)])
+    _write_capital_flow_current(
+        tmp_path,
+        [{"symbol": "600519.SH", "trade_date": date(2026, 4, 28), "main_net_inflow_rate": 1.0, "close_profit_ratio": 90.0, "data_method": "tushare_cyq_perf"}],
+    )
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    monkeypatch.setitem(sys.modules, "tushare", _FakeTushare)
+    events: list[dict[str, object]] = []
+
+    result = sync_report_workflow(config_path, workflow_id="wf_sync_dry_run", dry_run=True, end_date="2026-05-01", emit=events.append)
+
+    assert result.ok
+    assert "dry_run: no data fetched or promoted" in result.message
+    state = json.loads(workflow_status(config_path, "wf_sync_dry_run").message)
+    assert state["requires_confirmation"] is True
+    assert state["steps"]["sync_dry_run"]["status"] == "completed"
+    assert [event["event"] for event in events] == ["workflow_started", "step_started", "step_completed"]
+
+
+def test_new_cli_help_commands_are_available(capsys) -> None:
+    commands = [
+        ["publish", "build-report-artifact", "--help"],
+        ["analysis", "stock", "--help"],
+        ["workflow", "sync-report", "--help"],
+        ["app-worker", "run-once", "--help"],
+    ]
+
+    for command in commands:
+        with pytest.raises(SystemExit) as error:
+            cli_main(command)
+        assert error.value.code == 0
+
+    output = capsys.readouterr().out
+    assert "build-report-artifact" in output
+    assert "stock-picker analysis stock" in output
+    assert "stock-picker workflow sync-report" in output
+    assert "stock-picker app-worker run-once" in output
+
+
+def _write_storage_config(tmp_path: Path) -> Path:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config_path = config_dir / "storage.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "storage:",
+                "  data_root: ./data",
+                "  raw_root: ${storage.data_root}/raw",
+                "  curated_root: ${storage.data_root}/curated",
+                "  current_curated_root: ${storage.curated_root}/current",
+                "  frozen_curated_root: ${storage.curated_root}/frozen",
+                "  reports_root: ${storage.data_root}/reports",
+                "  backtests_root: ${storage.data_root}/backtests",
+                "  metadata_sqlite_path: ${storage.data_root}/metadata.sqlite",
+                "  schema_root: ./schemas",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _write_factor_run(tmp_path: Path, factor_run_id: str) -> None:
+    run_dir = tmp_path / "data" / "reports" / "factor_exploration" / factor_run_id
+    run_dir.mkdir(parents=True)
+    metadata = {
+        "factor_run_id": factor_run_id,
+        "snapshot_id": "snapshot_20260428_001",
+        "factor_version": "flow_momentum_quality_v001",
+        "start_date": "2026-04-27",
+        "end_date": "2026-04-28",
+        "created_at": "2026-04-28T16:00:00+00:00",
+        "dataset_paths": {},
+    }
+    (run_dir / "factor_run_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ", "300001.SZ"],
+            "trade_date": [date(2026, 4, 28), date(2026, 4, 28), date(2026, 4, 28)],
+            "name": ["Kweichow Moutai", "Ping An Bank", "Tech Sample"],
+            "market_segment": ["sh_main", "sz_main", "chinext"],
+            "industry": ["Food", "Bank", "Tech"],
+            "mom_20": [0.1, 0.05, -0.02],
+            "mom_60": [0.2, 0.04, 0.01],
+            "ma_strength": [0.03, 0.02, -0.01],
+            "flow_5d": [3.0, 2.0, 1.0],
+            "flow_20d": [6.0, 1.5, 0.5],
+            "flow_persistence": [0.8, 0.7, 0.4],
+            "winner_rate": [82.0, 75.0, 60.0],
+            "winner_rate_change_5d": [2.0, 1.0, -1.0],
+            "vol_20": [0.02, 0.03, 0.05],
+            "max_drawdown_60": [-0.05, -0.08, -0.2],
+            "avg_amount_20": [90000.0, 80000.0, 10000.0],
+            "momentum_score": [0.9, 0.7, 0.2],
+            "flow_score": [0.9, 0.75, 0.3],
+            "chip_score": [0.95, 0.8, 0.4],
+            "risk_score": [0.8, 0.7, 0.2],
+            "liquidity_score": [0.9, 0.8, 0.1],
+            "total_score": [0.89, 0.74, 0.24],
+            "tradable_flag": [True, True, False],
+            "exclusion_reason": ["none", "none", "low_liquidity"],
+            "factor_version": ["flow_momentum_quality_v001"] * 3,
+        }
+    ).write_csv(run_dir / "stock_factors_daily.csv")
+
+
+def _write_trading_calendar_current(tmp_path: Path) -> None:
+    calendar_path = tmp_path / "data" / "curated" / "current" / "trading_calendar" / "part-000.parquet"
+    calendar_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "calendar_id": ["cn_a_share"],
+            "trade_date": [date(2026, 4, 28)],
+            "is_trading_day": [True],
+        }
+    ).write_parquet(calendar_path)
+
+
+def _write_daily_prices_current(tmp_path: Path, trade_dates: list[date]) -> None:
+    daily_path = tmp_path / "data" / "curated" / "current" / "daily_prices" / "part-000.parquet"
+    daily_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH"] * len(trade_dates),
+            "trade_date": trade_dates,
+            "asset_type": ["stock"] * len(trade_dates),
+            "close": [10.0] * len(trade_dates),
+        }
+    ).write_parquet(daily_path)
+
+
+def _write_capital_flow_current(tmp_path: Path, rows: list[dict[str, object]]) -> None:
+    flow_path = tmp_path / "data" / "curated" / "current" / "capital_flow_or_chip" / "part-000.parquet"
+    flow_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(rows).write_parquet(flow_path)
+
+
+class _FakeTushare:
+    @staticmethod
+    def pro_api(token):
+        assert token == "test-token"
+        return _FakePro()
+
+
+class _FakePro:
+    def trade_cal(self, exchange=None, start_date=None, end_date=None):
+        return pl.DataFrame(
+            {
+                "exchange": ["SSE", "SSE", "SSE"],
+                "cal_date": ["20260429", "20260430", "20260501"],
+                "is_open": [1, 1, 0],
+                "pretrade_date": ["20260428", "20260429", "20260430"],
+            }
+        ).to_pandas()

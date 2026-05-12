@@ -6,6 +6,8 @@ pytest-cache-files-*/
 .ruff_cache/
 .mypy_cache/
 .tmp/
+node_modules/
+desktop-worker/node_modules/
 
 .env
 .env.*

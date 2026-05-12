@@ -1,0 +1,15 @@
+{
+  "name": "stock-picker-desktop-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stock Picker local desktop console and tray worker",
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "check": "node --check src/main.js && node --check src/preload.js"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  }
+}

@@ -1,0 +1,189 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  background: #f5f7f8;
+  color: #17201c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 248px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  background: #17201c;
+  color: #f7fbf7;
+  padding: 22px 18px;
+}
+
+.brand {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 28px;
+}
+
+.brand-mark {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  background: #f4c542;
+  color: #17201c;
+  font-weight: 800;
+}
+
+h1, h2, h3, p {
+  margin: 0;
+}
+
+.brand h1 {
+  font-size: 18px;
+}
+
+.brand p, .hint {
+  color: #6f7d76;
+  font-size: 13px;
+}
+
+nav {
+  display: grid;
+  gap: 6px;
+}
+
+button {
+  border: 0;
+  background: #e8eeee;
+  color: #17201c;
+  padding: 10px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #dce6e2;
+}
+
+.nav {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: #dce6e2;
+}
+
+.nav.active, .nav:hover {
+  background: #26332e;
+  color: #ffffff;
+}
+
+main {
+  min-width: 0;
+}
+
+.topbar {
+  min-height: 84px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 28px;
+  border-bottom: 1px solid #dde5e1;
+  background: #ffffff;
+}
+
+.danger {
+  background: #7f1d1d;
+  color: #ffffff;
+}
+
+.view {
+  display: none;
+  padding: 24px 28px;
+}
+
+.view.active {
+  display: block;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #dde5e1;
+  padding: 18px;
+}
+
+.panel span {
+  color: #6f7d76;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.panel strong {
+  font-size: 24px;
+}
+
+.wide {
+  max-width: 1120px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 14px;
+  margin: 16px 0;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: #33423b;
+  font-size: 13px;
+}
+
+input {
+  border: 1px solid #cbd8d2;
+  padding: 10px 12px;
+  font: inherit;
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+pre {
+  min-height: 220px;
+  max-height: 420px;
+  overflow: auto;
+  background: #0f1714;
+  color: #e5f3ed;
+  padding: 14px;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  body {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+  }
+
+  .metrics, .form-grid {
+    grid-template-columns: 1fr;
+  }
+}

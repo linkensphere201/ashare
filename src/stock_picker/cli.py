@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
 import logging
 import os
 from pathlib import Path
 import sys
 
 from stock_picker.config import StorageConfig, load_storage_config
+from stock_picker.analysis import analyze_stock
+from stock_picker.app_worker import run_worker_loop, run_worker_once
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.factor_exploration import (
@@ -20,12 +23,14 @@ from stock_picker.factor_exploration import (
 )
 from stock_picker.factor_research import research_candidate_001
 from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily
+from stock_picker.publish import build_report_artifact
 from stock_picker.quality import check_curated_quality
 from stock_picker.reports import show_report
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
 from stock_picker.storage import init_storage, register_schemas, validate_storage
 from stock_picker.strategy import backtest_candidate_001, rank_candidate_001
 from stock_picker.sync import sync_latest
+from stock_picker.workflow import pause_workflow, stock_analysis_workflow, sync_report_workflow, workflow_status
 
 
 LOGGER_NAME = "stock_picker"
@@ -63,6 +68,18 @@ def build_parser() -> argparse.ArgumentParser:
     reports = subparsers.add_parser("reports", help="Display generated reports")
     reports_subparsers = reports.add_subparsers(dest="reports_command", required=True)
 
+    publish = subparsers.add_parser("publish", help="Build commercial app publish artifacts")
+    publish_subparsers = publish.add_subparsers(dest="publish_command", required=True)
+
+    analysis = subparsers.add_parser("analysis", help="Build commercial app analysis outputs")
+    analysis_subparsers = analysis.add_subparsers(dest="analysis_command", required=True)
+
+    workflow = subparsers.add_parser("workflow", help="Run desktop workflow orchestration")
+    workflow_subparsers = workflow.add_subparsers(dest="workflow_command", required=True)
+
+    app_worker = subparsers.add_parser("app-worker", help="Run local app analysis worker")
+    app_worker_subparsers = app_worker.add_subparsers(dest="app_worker_command", required=True)
+
     show_report_cmd = reports_subparsers.add_parser(
         "show-report",
         help="Show a generated factor research report as PrettyTables",
@@ -70,6 +87,70 @@ def build_parser() -> argparse.ArgumentParser:
     show_report_cmd.add_argument("--report-id", required=True, help="Report id")
     show_report_cmd.add_argument("--limit", type=int, default=10, help="Maximum rows per displayed table")
     show_report_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    publish_artifact_cmd = publish_subparsers.add_parser(
+        "build-report-artifact",
+        help="Build a versioned stock-app publish artifact from a Candidate 002 factor run",
+    )
+    publish_artifact_cmd.add_argument("--factor-run-id", required=True, help="Candidate 002 factor run id")
+    publish_artifact_cmd.add_argument("--trade-date", help="Report date; defaults to latest factor date")
+    publish_artifact_cmd.add_argument("--previous-artifact", help="Optional previous publish artifact path for change labels")
+    publish_artifact_cmd.add_argument("--output", help="Output JSON path")
+    publish_artifact_cmd.add_argument("--top", type=int, default=20, help="Candidate count")
+    publish_artifact_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    analysis_stock_cmd = analysis_subparsers.add_parser(
+        "stock",
+        help="Build a structured specific-stock analysis artifact",
+    )
+    analysis_stock_cmd.add_argument("--symbol", required=True, help="Stock symbol, such as 600519.SH")
+    analysis_stock_cmd.add_argument("--factor-run-id", required=True, help="Candidate 002 factor run id")
+    analysis_stock_cmd.add_argument("--trade-date", help="Analysis date; defaults to latest factor date")
+    analysis_stock_cmd.add_argument("--output", help="Output JSON path")
+    analysis_stock_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    workflow_sync_cmd = workflow_subparsers.add_parser(
+        "sync-report",
+        help="Run the desktop sync-latest -> report artifact workflow",
+    )
+    workflow_sync_cmd.add_argument("--workflow-id", help="Stable workflow id for resume/status")
+    workflow_sync_cmd.add_argument("--dry-run", action="store_true", help="Only inspect missing data")
+    workflow_sync_cmd.add_argument("--confirm", action="store_true", help="Allow real execution after preflight")
+    workflow_sync_cmd.add_argument("--factor-run-id", help="Optional Candidate 002 factor run id")
+    workflow_sync_cmd.add_argument("--start-date", help="Optional start date")
+    workflow_sync_cmd.add_argument("--end-date", help="Optional end date")
+    workflow_sync_cmd.add_argument("--top", type=int, default=20, help="Candidate count")
+    workflow_sync_cmd.add_argument("--json-events", action="store_true", help="Print workflow events as JSON lines")
+    workflow_sync_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    workflow_stock_cmd = workflow_subparsers.add_parser(
+        "stock-analysis",
+        help="Run stock analysis through the desktop workflow runtime",
+    )
+    workflow_stock_cmd.add_argument("--symbol", required=True)
+    workflow_stock_cmd.add_argument("--factor-run-id", required=True)
+    workflow_stock_cmd.add_argument("--workflow-id")
+    workflow_stock_cmd.add_argument("--trade-date")
+    workflow_stock_cmd.add_argument("--json-events", action="store_true")
+    workflow_stock_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    workflow_status_cmd = workflow_subparsers.add_parser("status", help="Show workflow status")
+    workflow_status_cmd.add_argument("--workflow-id")
+    workflow_status_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    workflow_pause_cmd = workflow_subparsers.add_parser("pause", help="Pause a workflow at the next step boundary")
+    workflow_pause_cmd.add_argument("--workflow-id", required=True)
+    workflow_pause_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    app_worker_once_cmd = app_worker_subparsers.add_parser("run-once", help="Claim and process at most one app task")
+    app_worker_once_cmd.add_argument("--worker-config", default="config/app-worker.yaml", help="Path to local worker config")
+    app_worker_once_cmd.add_argument("--mock-task", help="Optional mock task JSON path")
+    app_worker_once_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    app_worker_run_cmd = app_worker_subparsers.add_parser("run", help="Run the polling app worker loop")
+    app_worker_run_cmd.add_argument("--worker-config", default="config/app-worker.yaml", help="Path to local worker config")
+    app_worker_run_cmd.add_argument("--max-iterations", type=int, help="Optional max poll iterations")
+    app_worker_run_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     factor_research_candidate_cmd = factor_subparsers.add_parser(
         "research-candidate-001",
@@ -640,6 +721,68 @@ def execute_command(args: argparse.Namespace, context: CliContext):
             limit=args.limit,
         )
 
+    if args.command == "publish" and args.publish_command == "build-report-artifact":
+        return build_report_artifact(
+            context.config_path,
+            factor_run_id=args.factor_run_id,
+            trade_date=args.trade_date,
+            previous_artifact_path=Path(args.previous_artifact) if args.previous_artifact else None,
+            output_path=Path(args.output) if args.output else None,
+            top=args.top,
+        )
+
+    if args.command == "analysis" and args.analysis_command == "stock":
+        return analyze_stock(
+            context.config_path,
+            symbol=args.symbol,
+            factor_run_id=args.factor_run_id,
+            trade_date=args.trade_date,
+            output_path=Path(args.output) if args.output else None,
+        )
+
+    if args.command == "workflow" and args.workflow_command == "sync-report":
+        return sync_report_workflow(
+            context.config_path,
+            workflow_id=args.workflow_id,
+            dry_run=args.dry_run or not args.confirm,
+            confirmed=args.confirm,
+            factor_run_id=args.factor_run_id,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            top=args.top,
+            emit=_json_event_printer if args.json_events else None,
+        )
+
+    if args.command == "workflow" and args.workflow_command == "stock-analysis":
+        return stock_analysis_workflow(
+            context.config_path,
+            symbol=args.symbol,
+            factor_run_id=args.factor_run_id,
+            workflow_id=args.workflow_id,
+            trade_date=args.trade_date,
+            emit=_json_event_printer if args.json_events else None,
+        )
+
+    if args.command == "workflow" and args.workflow_command == "status":
+        return workflow_status(context.config_path, args.workflow_id)
+
+    if args.command == "workflow" and args.workflow_command == "pause":
+        return pause_workflow(context.config_path, args.workflow_id)
+
+    if args.command == "app-worker" and args.app_worker_command == "run-once":
+        return run_worker_once(
+            context.config_path,
+            worker_config_path=Path(args.worker_config),
+            mock_task_path=Path(args.mock_task) if args.mock_task else None,
+        )
+
+    if args.command == "app-worker" and args.app_worker_command == "run":
+        return run_worker_loop(
+            context.config_path,
+            worker_config_path=Path(args.worker_config),
+            max_iterations=args.max_iterations,
+        )
+
     return CliCommandResult(False, "unsupported command", 2)
 
 
@@ -688,6 +831,10 @@ def _configure_progress_logger() -> logging.Logger:
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
     return logger
+
+
+def _json_event_printer(event: dict) -> None:
+    print(json.dumps(event, ensure_ascii=False, sort_keys=True))
 
 
 if __name__ == "__main__":

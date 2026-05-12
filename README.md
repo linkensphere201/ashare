@@ -478,6 +478,34 @@ Example:
 stock-picker reports show-report --config config/storage.yaml --report-id candidate_001_v2_snapshot_20260428_003 --limit 10
 ```
 
+### Desktop Console and App Boundary
+
+The Electron desktop console under `desktop-worker/` uses the Python CLI as its execution runtime. The UI should not implement research logic directly.
+
+New stock-app boundary commands:
+
+| Command | Purpose |
+| --- | --- |
+| `stock-picker publish build-report-artifact` | Build a versioned app-ingestable Candidate 002 publish artifact |
+| `stock-picker analysis stock` | Build a structured specific-stock analysis artifact |
+| `stock-picker workflow sync-report` | Run the desktop sync/report workflow, with dry-run preflight by default |
+| `stock-picker workflow stock-analysis` | Run stock analysis through the workflow state/event layer |
+| `stock-picker workflow status` | Show recent or specific workflow state |
+| `stock-picker workflow pause` | Mark a workflow paused at the next step boundary |
+| `stock-picker app-worker run-once` | Claim and process at most one app analysis task |
+| `stock-picker app-worker run` | Poll the app queue repeatedly |
+
+Examples:
+
+```powershell
+stock-picker publish build-report-artifact --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --top 20
+stock-picker analysis stock --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --symbol 600519.SH
+stock-picker workflow sync-report --config config/storage.yaml --dry-run --json-events
+stock-picker app-worker run-once --config config/storage.yaml --worker-config config/app-worker.yaml
+```
+
+The first version uses mock worker tasks and local artifacts for tests. Real Tushare sync and real stock-app backend upload are not part of unit tests.
+
 ## Manual CSV Debug Path
 
 Manual CSV templates live under `examples/manual_input/`. They are kept for development, tests, and emergency debugging only.
@@ -499,6 +527,25 @@ Run tests with a workspace-local pytest temp/cache directory on Windows:
 ```
 
 The local temp/cache flags avoid permission problems with the global Windows temp directory.
+
+When running through the `stock-picker/` junction inside `project-manager`, prefer a temp/cache directory outside the junction target:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest --basetemp E:\projects\project-manager\.tmp-stock-tests\pytest-full -o cache_dir=E:\projects\project-manager\.tmp-stock-tests\pytest-cache-full
+```
+
+Desktop console focused tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_desktop_console.py --basetemp E:\projects\project-manager\.tmp-stock-tests\pytest-desktop -o cache_dir=E:\projects\project-manager\.tmp-stock-tests\pytest-cache-desktop
+```
+
+Electron syntax check:
+
+```powershell
+cd desktop-worker
+npm.cmd run check
+```
 
 ## Portability
 
