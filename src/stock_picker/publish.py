@@ -363,6 +363,7 @@ def _index_payload(row: dict[str, Any] | None, all_rows: list[dict[str, Any]], k
         "code": row["code"],
         "name": row["name"],
         "role": row["role"],
+        "return_1d": _float(row.get("return_1d")),
         "reason": _index_reason(row, all_rows, kind),
     }
 
@@ -440,17 +441,24 @@ def _candidate_stock(row: dict[str, Any], previous: dict[str, dict[str, Any]]) -
     symbol = str(row.get("symbol"))
     industry = row.get("industry")
     total_score = _float(row.get("total_score"))
-    return {
-        "rank": int(row.get("rank") or 0),
+    rank = int(row.get("rank") or 0)
+    previous_item = previous.get(symbol)
+    previous_rank = int(previous_item.get("rank")) if previous_item and previous_item.get("rank") else None
+    payload = {
+        "rank": rank,
+        "current_rank": rank,
         "symbol": symbol,
         "name": row.get("name"),
         "industry_l1": industry,
         "theme": SECTOR_THEME.get(str(industry), "其他"),
-        "change_status": _change_status(int(row.get("rank") or 0), previous.get(symbol)),
+        "change_status": _change_status(rank, previous_item),
         "reason_summary": _reason_summary(row),
         "risk_summary": _risk_summary(row),
         "score": {"visible_to_client": False, "total_score": total_score},
     }
+    if previous_rank is not None:
+        payload["previous_rank"] = previous_rank
+    return payload
 
 
 def _candidate_diff(current: list[dict[str, Any]], previous: dict[str, dict[str, Any]]) -> dict[str, Any]:

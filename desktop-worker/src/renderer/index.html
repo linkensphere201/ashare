@@ -55,7 +55,7 @@
             <label>Start date <input id="sync-start" placeholder="2026-01-01" /></label>
             <label>End date <input id="sync-end" placeholder="2026-05-12" /></label>
             <label>Factor run id <input id="sync-factor-run" placeholder="optional" /></label>
-            <label>Top N <input id="sync-top" type="number" value="20" /></label>
+            <label>Top N <input id="sync-top" type="number" value="10" /></label>
           </div>
           <div class="actions">
             <button data-command="sync-dry-run">Preflight</button>
@@ -72,7 +72,7 @@
             <label>Factor run id <input id="report-factor-run" /></label>
             <label>Trade date <input id="report-date" placeholder="optional" /></label>
             <label>Output path <input id="report-output" placeholder="optional" /></label>
-            <label>Top N <input id="report-top" type="number" value="20" /></label>
+            <label>Top N <input id="report-top" type="number" value="10" /></label>
           </div>
           <div class="actions">
             <button data-command="build-artifact">Build daily bundle</button>
@@ -116,6 +116,18 @@
             <button data-command="daily-check">Check and mock upload</button>
           </div>
         </div>
+        <div class="panel wide">
+          <h3>Holding price refresh</h3>
+          <div class="form-grid">
+            <label>Trade date <input id="holding-trade-date" placeholder="optional" /></label>
+            <label>Tushare token env <input id="holding-token-env" value="TUSHARE_TOKEN" /></label>
+            <label>Mock watchlist <input id="holding-watchlist" placeholder="optional mock watchlist json" /></label>
+            <label>Mock upload path <input id="holding-upload-path" placeholder="optional local output json" /></label>
+          </div>
+          <div class="actions">
+            <button data-command="holding-refresh">Refresh prices</button>
+          </div>
+        </div>
       </section>
 
       <section id="logs" class="view">
@@ -132,7 +144,9 @@
             <label>Storage config <input id="storage-config" value="config/storage.yaml" /></label>
             <label>App base URL <input value="http://127.0.0.1:3000" /></label>
             <label>Worker token env <input value="STOCK_APP_WORKER_TOKEN" /></label>
+            <label>Publisher token env <input value="STOCK_APP_PUBLISHER_TOKEN" /></label>
             <label>Poll interval seconds <input type="number" value="15" /></label>
+            <label>Holding price poll seconds <input type="number" value="300" /></label>
           </div>
           <p class="hint">Settings are displayed here for the first version. Runtime config remains in local YAML/env files.</p>
         </div>

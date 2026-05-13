@@ -3,7 +3,7 @@ const titles = {
   sync: ['Sync', 'Preflight local data gaps, then run confirmed workflows.'],
   report: ['Daily Bundle', 'Build and upload market status plus candidate pool bundles.'],
   analysis: ['Stock Analysis', 'Generate a structured research card for one symbol.'],
-  worker: ['Worker', 'Poll stock-analysis jobs and run daily bundle checks.'],
+  worker: ['Worker', 'Poll stock-analysis jobs, publish daily bundles, and refresh holding prices.'],
   logs: ['Logs', 'Workflow and command output.'],
   settings: ['Settings', 'Local runtime settings.']
 };
@@ -76,6 +76,10 @@ async function runMappedCommand(name) {
   }
   if (name === 'daily-check') {
     await run(clean(['app-worker', 'daily-check', '--worker-config', value('#worker-config'), '--factor-run-id', value('#daily-factor-run'), '--trade-date', value('#daily-trade-date'), '--top', value('#daily-top'), '--mock-upload', ...args]));
+    return;
+  }
+  if (name === 'holding-refresh') {
+    await run(clean(['app-worker', 'refresh-holding-prices', '--worker-config', value('#worker-config'), '--trade-date', value('#holding-trade-date'), '--token-env', value('#holding-token-env'), '--mock-watchlist', value('#holding-watchlist'), '--mock-upload-path', value('#holding-upload-path'), ...args]));
   }
 }
 

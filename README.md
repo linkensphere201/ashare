@@ -497,6 +497,7 @@ New stock-app boundary commands:
 | `stock-picker app-worker run-once` | Claim and process at most one app-triggered stock analysis task |
 | `stock-picker app-worker run` | Poll the app stock-analysis queue repeatedly |
 | `stock-picker app-worker daily-check` | Build and upload the daily bundle when local data is ready and the bundle was not already uploaded |
+| `stock-picker app-worker refresh-holding-prices` | Pull APP holding symbol watchlist, refresh prices from Tushare daily quotes, and upload holding prices |
 
 Examples:
 
@@ -506,52 +507,62 @@ stock-picker analysis stock --config config/storage.yaml --factor-run-id factor_
 stock-picker workflow sync-report --config config/storage.yaml --dry-run --json-events
 stock-picker app-worker daily-check --config config/storage.yaml --worker-config config/app-worker.yaml --factor-run-id factor_002_latest_20260506
 stock-picker app-worker run-once --config config/storage.yaml --worker-config config/app-worker.yaml
+stock-picker app-worker refresh-holding-prices --config config/storage.yaml --worker-config config/app-worker.yaml
 ```
 
-The daily upload path is `daily_publish_bundle_v001`; the old broad publish artifact is not a supported product path. The first version uses mock worker tasks and mock result uploads for tests. Real Tushare sync and real stock-app backend upload are not part of unit tests.
+The daily upload path is `daily_publish_bundle_v001`; the old broad publish artifact is not a supported product path. Unit tests use mock worker tasks, mock daily uploads, and mock holding-price watchlists. Real Tushare sync and real stock-app backend upload are not part of unit tests.
 
 #### App and Worker Flow
 
-The APP backend exposes one result upload interface for worker outputs. The same interface accepts daily bundles and stock-analysis job results, and performs lightweight schema/hash/safety validation before saving the result.
-
 The app boundary is split into two independent flows:
 
-- App-triggered stock analysis: a user clicks stock analysis in APP, APP backend creates a `stock_analysis` job with `pending` status and returns immediately. The local worker polls APP backend, finds a pending job, claims the job description locally, runs `stock_app_stock_analysis_v001`, then uploads the job result through the shared result upload interface.
-- Worker-triggered daily analysis: APP has no user-triggered daily-analysis flow. The APP only displays the latest result date; if that date is outdated, it should show that today's update has not completed yet. The local worker runs daily analysis on a schedule, builds `daily_publish_bundle_v001`, then uploads it through the shared result upload interface.
+- App-triggered stock analysis: a user clicks stock analysis in APP, APP backend creates a `stock_analysis` job with `pending` status and returns immediately. The local worker polls `POST /api/worker/analysis-requests/claim`, runs `stock_app_stock_analysis_v001`, then writes the result to `POST /api/worker/analysis-requests/{requestId}/result` using the worker token.
+- Worker-triggered daily analysis: APP has no user-triggered daily-analysis flow. The APP only displays the latest result date; if that date is outdated, it should show that today's update has not completed yet. The local worker runs daily analysis on a schedule, builds `daily_publish_bundle_v001`, then uploads the raw bundle JSON to `POST /api/publish/daily-bundles` using the publisher token.
+- Worker-triggered holding price refresh: the local worker polls `GET /api/worker/holding-prices/watchlist`, refreshes distinct holding symbols from local Tushare daily quotes, then uploads `{ "prices": [...] }` to `POST /api/worker/holding-prices` using the worker token.
 
 `report_update` is not part of the app task queue. Daily report generation is a local worker responsibility because it produces one global market status plus candidate pool bundle for all users. APP backend stores and displays that global bundle; user-specific holding risk matching remains APP-side logic using the public `market_status.match_rules`.
 
-The shared result upload payload for daily bundle is:
+The daily bundle upload body is the raw bundle:
 
 ```json
 {
-  "result_type": "daily_bundle",
-  "worker_id": "local-worker",
-  "trade_date": "2026-05-13",
-  "schema_version": "daily_publish_bundle_v001",
-  "artifact_hash": "...",
-  "artifact_json": {
-    "bundle_metadata": {},
-    "market_status": {},
-    "candidate_pool": {}
-  }
+  "bundle_metadata": {
+    "schema_version": "daily_publish_bundle_v001",
+    "bundle_hash": "..."
+  },
+  "market_status": {},
+  "candidate_pool": {}
 }
 ```
 
-The shared result upload payload for stock analysis is:
+The stock analysis result upload body is:
 
 ```json
 {
-  "result_type": "stock_analysis",
-  "job_id": "job_123",
-  "worker_id": "local-worker",
-  "schema_version": "stock_app_stock_analysis_v001",
-  "artifact_hash": "...",
-  "artifact_json": {
+  "status": "completed",
+  "result_artifact_json": {
     "analysis_metadata": {},
     "stock": {},
     "candidate_status": {}
-  }
+  },
+  "warnings_json": []
+}
+```
+
+The holding price upload body is:
+
+```json
+{
+  "prices": [
+    {
+      "symbol": "600519.SH",
+      "name": "Kweichow Moutai",
+      "last_price": 1688.0,
+      "change_percent": 1.23,
+      "quote_time": "2026-04-28T15:00:00+08:00",
+      "source": "tushare.daily"
+    }
+  ]
 }
 ```
 

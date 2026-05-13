@@ -12,7 +12,7 @@ import sys
 
 from stock_picker.config import StorageConfig, load_storage_config
 from stock_picker.analysis import analyze_stock
-from stock_picker.app_worker import run_daily_check, run_worker_loop, run_worker_once
+from stock_picker.app_worker import run_daily_check, run_holding_price_loop, run_holding_price_refresh, run_worker_loop, run_worker_once
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.factor_exploration import (
@@ -181,9 +181,20 @@ def build_parser() -> argparse.ArgumentParser:
     app_worker_daily_cmd.add_argument("--previous-bundle", help="Previous daily_publish_bundle_v001 JSON path")
     app_worker_daily_cmd.add_argument("--top", type=int, default=10, help="Candidate count")
     app_worker_daily_cmd.add_argument("--force", action="store_true", help="Upload even if the same trade_date/hash was already uploaded")
-    app_worker_daily_cmd.add_argument("--mock-upload", action="store_true", help="Write the shared result upload payload locally instead of calling APP backend")
+    app_worker_daily_cmd.add_argument("--mock-upload", action="store_true", help="Write the raw daily bundle locally instead of calling APP backend")
     app_worker_daily_cmd.add_argument("--mock-upload-path", help="Optional local JSON path for --mock-upload")
     app_worker_daily_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    app_worker_holding_cmd = app_worker_subparsers.add_parser("refresh-holding-prices", help="Refresh APP holding prices from local Tushare quotes")
+    app_worker_holding_cmd.add_argument("--worker-config", default="config/app-worker.yaml", help="Path to local worker config")
+    app_worker_holding_cmd.add_argument("--trade-date", help="Optional Tushare trade date; defaults to latest available quote")
+    app_worker_holding_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing Tushare token")
+    app_worker_holding_cmd.add_argument("--mock-watchlist", help="Optional mock APP watchlist JSON path")
+    app_worker_holding_cmd.add_argument("--mock-upload-path", help="Optional local JSON path for uploaded price payload")
+    app_worker_holding_cmd.add_argument("--limit", type=int, help="Maximum symbols to refresh")
+    app_worker_holding_cmd.add_argument("--loop", action="store_true", help="Run repeatedly using the configured holding price poll interval")
+    app_worker_holding_cmd.add_argument("--max-iterations", type=int, help="Optional max loop iterations")
+    app_worker_holding_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     factor_research_candidate_cmd = factor_subparsers.add_parser(
         "research-candidate-001",
@@ -847,6 +858,26 @@ def execute_command(args: argparse.Namespace, context: CliContext):
             force=args.force,
             mock_upload=args.mock_upload,
             mock_upload_path=Path(args.mock_upload_path) if args.mock_upload_path else None,
+        )
+
+    if args.command == "app-worker" and args.app_worker_command == "refresh-holding-prices":
+        if args.loop:
+            return run_holding_price_loop(
+                worker_config_path=Path(args.worker_config),
+                trade_date=args.trade_date,
+                token_env=args.token_env,
+                mock_watchlist_path=Path(args.mock_watchlist) if args.mock_watchlist else None,
+                mock_upload_path=Path(args.mock_upload_path) if args.mock_upload_path else None,
+                limit=args.limit,
+                max_iterations=args.max_iterations,
+            )
+        return run_holding_price_refresh(
+            worker_config_path=Path(args.worker_config),
+            trade_date=args.trade_date,
+            token_env=args.token_env,
+            mock_watchlist_path=Path(args.mock_watchlist) if args.mock_watchlist else None,
+            mock_upload_path=Path(args.mock_upload_path) if args.mock_upload_path else None,
+            limit=args.limit,
         )
 
     return CliCommandResult(False, "unsupported command", 2)

@@ -10,7 +10,7 @@ import pytest
 
 from stock_picker.cli import main as cli_main
 from stock_picker.analysis import analyze_stock
-from stock_picker.app_worker import run_daily_check, run_worker_once
+from stock_picker.app_worker import run_daily_check, run_holding_price_refresh, run_worker_once
 from stock_picker.curated import promote_raw_batch
 from stock_picker.provider import probe_provider_api, write_raw_batch
 from stock_picker.publish import build_candidate_pool, build_daily_bundle, build_market_status, validate_daily_bundle
@@ -99,7 +99,11 @@ def test_candidate_pool_change_labels_from_previous_pool(tmp_path: Path) -> None
     assert result.artifact is not None
     changes = {item["symbol"]: item["change_status"] for item in result.artifact["top_stocks"]}
     assert changes == {"600519.SH": "upgraded", "300750.SZ": "retained", "688001.SH": "downgraded", "000002.SZ": "newly_added"}
+    ranks = {item["symbol"]: (item["current_rank"], item.get("previous_rank")) for item in result.artifact["top_stocks"]}
+    assert ranks["600519.SH"] == (1, 3)
+    assert ranks["300750.SZ"] == (2, 2)
     assert result.artifact["diff"]["removed"][0]["symbol"] == "600000.SH"
+    assert result.artifact["diff"]["removed"][0]["previous_rank"] == 4
 
 
 def test_candidate_pool_rejects_invalid_inputs_and_empty_factor_run(tmp_path: Path) -> None:
@@ -131,7 +135,9 @@ def test_market_status_identifies_index_and_sector_strength(tmp_path: Path) -> N
     payload = result.artifact
     assert payload["market_status_metadata"]["schema_version"] == "market_status_v001"
     assert payload["index_markets"]["strongest"]["name"] == "中证500"
+    assert payload["index_markets"]["strongest"]["return_1d"] == 1.4
     assert payload["index_markets"]["weakest"]["name"] == "创业板指"
+    assert payload["index_markets"]["weakest"]["return_1d"] == -1.1
     assert payload["sectors"]["strongest"] == ["通信", "机械设备", "电子"]
     assert payload["sectors"]["weakest"] == ["房地产", "医药生物", "食品饮料"]
     assert payload["sectors"]["summary_text"] != "强势方向集中在通信、机械设备、电子，弱势方向集中在房地产、医药生物、食品饮料。"
@@ -252,12 +258,9 @@ def test_worker_run_once_processes_mock_stock_analysis(tmp_path: Path) -> None:
 
     assert result.ok
     response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
-    assert response["result_type"] == "stock_analysis"
-    assert response["job_id"] == "request_001"
     assert response["status"] == "completed"
-    assert response["schema_version"] == "stock_app_stock_analysis_v001"
-    assert response["artifact_json"]["stock"]["symbol"] == "600519.SH"
-    assert response["artifact_hash"]
+    assert response["result_artifact_json"]["analysis_metadata"]["schema_version"] == "stock_app_stock_analysis_v001"
+    assert response["result_artifact_json"]["stock"]["symbol"] == "600519.SH"
 
 
 def test_worker_run_once_processes_bom_stock_analysis_mock_task(tmp_path: Path) -> None:
@@ -277,31 +280,64 @@ def test_worker_run_once_processes_bom_stock_analysis_mock_task(tmp_path: Path) 
     assert result.ok
     response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
     assert response["status"] == "completed"
-    assert response["artifact_json"]["stock"]["symbol"] == "600519.SH"
+    assert response["result_artifact_json"]["stock"]["symbol"] == "600519.SH"
+
+
+def test_worker_run_once_accepts_stock_app_camel_case_task(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("default_factor_run_id: factor_002_test\n", encoding="utf-8")
+    mock_task = tmp_path / "task.json"
+    mock_task.write_text(
+        json.dumps({"analysis_request": {"id": "request_002b", "requestType": "stock_analysis", "symbol": "600519.SH", "reportDate": "2026-04-28"}}),
+        encoding="utf-8",
+    )
+
+    result = run_worker_once(config_path, worker_config, mock_task)
+
+    assert result.ok
+    response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
+    assert response["status"] == "completed"
+    assert response["result_artifact_json"]["stock"]["symbol"] == "600519.SH"
 
 
 def test_daily_check_mock_uploads_bundle_and_skips_duplicate_hash(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
-    _write_factor_run(tmp_path, "factor_002_test")
+    _write_factor_run_with_ten_tradable(tmp_path, "factor_002_test")
     _write_market_status_inputs(tmp_path)
     worker_config = tmp_path / "config" / "app-worker.yaml"
     worker_config.write_text("worker_id: local-test-worker\ndefault_factor_run_id: factor_002_test\n", encoding="utf-8")
     upload_path = tmp_path / "daily-upload.json"
 
-    first = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=2)
-    second = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=2)
+    first = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=10)
+    second = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=10)
 
     assert first.ok
     assert second.ok
     assert "already uploaded" in second.message
     response = json.loads(upload_path.read_text(encoding="utf-8"))
-    assert response["result_type"] == "daily_bundle"
-    assert response["worker_id"] == "local-test-worker"
-    assert response["schema_version"] == "daily_publish_bundle_v001"
-    assert response["artifact_json"]["candidate_pool"]["candidate_pool_metadata"]["schema_version"] == "candidate_pool_v001"
+    assert response["bundle_metadata"]["schema_version"] == "daily_publish_bundle_v001"
+    assert response["candidate_pool"]["candidate_pool_metadata"]["schema_version"] == "candidate_pool_v001"
+    assert len(response["candidate_pool"]["top_stocks"]) == 10
     state = json.loads((tmp_path / "data" / "reports" / "app_worker" / "daily_upload_state.json").read_text(encoding="utf-8"))
-    assert state["daily_bundle_uploads"]["2026-04-28"]["artifact_hash"] == response["artifact_hash"]
+    assert state["daily_bundle_uploads"]["2026-04-28"]["artifact_hash"] == response["bundle_metadata"]["bundle_hash"]
+
+
+def test_daily_check_rejects_upload_when_candidate_pool_is_not_top_10(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+    _write_market_status_inputs(tmp_path)
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("default_factor_run_id: factor_002_test\n", encoding="utf-8")
+
+    result = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, top=2)
+
+    assert not result.ok
+    assert "exactly 10" in result.message
 
 
 def test_daily_check_requires_factor_run_id(tmp_path: Path) -> None:
@@ -358,6 +394,61 @@ def test_worker_run_once_reports_missing_http_token(tmp_path: Path, monkeypatch)
 
     assert not result.ok
     assert "missing required environment variable: TEST_STOCK_WORKER_TOKEN" in result.message
+
+
+def test_daily_check_reports_missing_publisher_token(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run_with_ten_tradable(tmp_path, "factor_002_test")
+    _write_market_status_inputs(tmp_path)
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("publisher_token_env: TEST_STOCK_PUBLISHER_TOKEN\ndefault_factor_run_id: factor_002_test\n", encoding="utf-8")
+    monkeypatch.delenv("TEST_STOCK_PUBLISHER_TOKEN", raising=False)
+    monkeypatch.delenv("PUBLISHER_TOKEN", raising=False)
+
+    result = run_daily_check(config_path, worker_config, trade_date="2026-04-28")
+
+    assert not result.ok
+    assert "missing required environment variable: TEST_STOCK_PUBLISHER_TOKEN" in result.message
+
+
+def test_holding_price_refresh_mock_watchlist_and_upload(tmp_path: Path, monkeypatch) -> None:
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.parent.mkdir(parents=True)
+    worker_config.write_text("worker_id: local-test-worker\n", encoding="utf-8")
+    watchlist = tmp_path / "watchlist.json"
+    watchlist.write_text(json.dumps({"symbols": [{"symbol": "600519.SH", "name": "Kweichow Moutai"}]}), encoding="utf-8")
+    upload_path = tmp_path / "holding-prices.json"
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    monkeypatch.setitem(sys.modules, "tushare", _FakeTushare)
+
+    result = run_holding_price_refresh(worker_config, trade_date="2026-04-28", mock_watchlist_path=watchlist, mock_upload_path=upload_path)
+
+    assert result.ok
+    payload = json.loads(upload_path.read_text(encoding="utf-8"))
+    assert payload["prices"][0]["symbol"] == "600519.SH"
+    assert payload["prices"][0]["last_price"] == 1688.0
+    assert payload["prices"][0]["change_percent"] == 1.23
+    assert payload["prices"][0]["quote_time"] == "2026-04-28T15:00:00+08:00"
+    assert payload["prices"][0]["source"] == "tushare.daily"
+
+
+def test_holding_price_refresh_handles_empty_watchlist_and_missing_token(tmp_path: Path, monkeypatch) -> None:
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.parent.mkdir(parents=True)
+    worker_config.write_text("", encoding="utf-8")
+    watchlist = tmp_path / "watchlist.json"
+    watchlist.write_text(json.dumps({"symbols": []}), encoding="utf-8")
+
+    empty = run_holding_price_refresh(worker_config, mock_watchlist_path=watchlist)
+    assert empty.ok
+    assert "watchlist empty" in empty.message
+
+    watchlist.write_text(json.dumps({"symbols": [{"symbol": "600519.SH"}]}), encoding="utf-8")
+    monkeypatch.delenv("MISSING_TUSHARE_TOKEN", raising=False)
+    missing = run_holding_price_refresh(worker_config, token_env="MISSING_TUSHARE_TOKEN", mock_watchlist_path=watchlist)
+    assert not missing.ok
+    assert "missing required environment variable: MISSING_TUSHARE_TOKEN" in missing.message
 
 
 def test_workflow_status_pause_and_stock_analysis(tmp_path: Path) -> None:
@@ -438,6 +529,7 @@ def test_new_cli_help_commands_are_available(capsys) -> None:
         ["workflow", "sync-report", "--help"],
         ["app-worker", "run-once", "--help"],
         ["app-worker", "daily-check", "--help"],
+        ["app-worker", "refresh-holding-prices", "--help"],
     ]
 
     for command in commands:
@@ -453,6 +545,7 @@ def test_new_cli_help_commands_are_available(capsys) -> None:
     assert "stock-picker workflow sync-report" in output
     assert "stock-picker app-worker run-once" in output
     assert "daily-check" in output
+    assert "refresh-holding-prices" in output
 
 
 def _write_storage_config(tmp_path: Path) -> Path:
@@ -567,6 +660,51 @@ def _write_factor_run_with_four_tradable(tmp_path: Path, factor_run_id: str) -> 
     ).write_csv(run_dir / "stock_factors_daily.csv")
 
 
+def _write_factor_run_with_ten_tradable(tmp_path: Path, factor_run_id: str) -> None:
+    run_dir = tmp_path / "data" / "reports" / "factor_exploration" / factor_run_id
+    run_dir.mkdir(parents=True)
+    metadata = {
+        "factor_run_id": factor_run_id,
+        "snapshot_id": "snapshot_20260428_001",
+        "factor_version": "flow_momentum_quality_v001",
+        "start_date": "2026-04-27",
+        "end_date": "2026-04-28",
+        "created_at": "2026-04-28T16:00:00+00:00",
+        "dataset_paths": {},
+    }
+    (run_dir / "factor_run_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    symbols = [f"6005{index:02d}.SH" for index in range(10)]
+    pl.DataFrame(
+        {
+            "symbol": symbols,
+            "trade_date": [date(2026, 4, 28)] * 10,
+            "name": [f"Sample {index}" for index in range(10)],
+            "market_segment": ["sh_main"] * 10,
+            "industry": ["通信", "机械设备", "电子", "银行", "汽车", "煤炭", "计算机", "食品饮料", "医药生物", "公用事业"],
+            "mom_20": [0.1] * 10,
+            "mom_60": [0.2] * 10,
+            "ma_strength": [0.03] * 10,
+            "flow_5d": [3.0] * 10,
+            "flow_20d": [6.0] * 10,
+            "flow_persistence": [0.8] * 10,
+            "winner_rate": [82.0] * 10,
+            "winner_rate_change_5d": [2.0] * 10,
+            "vol_20": [0.02] * 10,
+            "max_drawdown_60": [-0.05] * 10,
+            "avg_amount_20": [90000.0] * 10,
+            "momentum_score": [0.9] * 10,
+            "flow_score": [0.9] * 10,
+            "chip_score": [0.95] * 10,
+            "risk_score": [0.8] * 10,
+            "liquidity_score": [0.9] * 10,
+            "total_score": [1.0 - index * 0.01 for index in range(10)],
+            "tradable_flag": [True] * 10,
+            "exclusion_reason": ["none"] * 10,
+            "factor_version": ["flow_momentum_quality_v001"] * 10,
+        }
+    ).write_csv(run_dir / "stock_factors_daily.csv")
+
+
 def _write_market_status_inputs(tmp_path: Path) -> None:
     _write_index_daily_current(tmp_path)
     industry_path = tmp_path / "data" / "curated" / "current" / "industry_daily" / "part-000.parquet"
@@ -668,3 +806,8 @@ class _FakePro:
         assert ts_code == "801770.SI"
         assert trade_date == "20260428"
         return pl.DataFrame({"ts_code": ["801770.SI"], "trade_date": ["20260428"], "close": [1234.5], "pct_change": [2.4]}).to_pandas()
+
+    def daily(self, ts_code=None, trade_date=None):
+        assert ts_code == "600519.SH"
+        assert trade_date == "20260428"
+        return pl.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260428"], "close": [1688.0], "pct_chg": [1.23]}).to_pandas()
