@@ -10,7 +10,7 @@ import pytest
 
 from stock_picker.cli import main as cli_main
 from stock_picker.analysis import analyze_stock
-from stock_picker.app_worker import run_worker_once
+from stock_picker.app_worker import run_daily_check, run_worker_once
 from stock_picker.curated import promote_raw_batch
 from stock_picker.provider import probe_provider_api, write_raw_batch
 from stock_picker.publish import build_candidate_pool, build_daily_bundle, build_market_status, validate_daily_bundle
@@ -252,20 +252,23 @@ def test_worker_run_once_processes_mock_stock_analysis(tmp_path: Path) -> None:
 
     assert result.ok
     response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
+    assert response["result_type"] == "stock_analysis"
+    assert response["job_id"] == "request_001"
     assert response["status"] == "completed"
-    assert response["result_artifact_json"]["stock"]["symbol"] == "600519.SH"
+    assert response["schema_version"] == "stock_app_stock_analysis_v001"
+    assert response["artifact_json"]["stock"]["symbol"] == "600519.SH"
+    assert response["artifact_hash"]
 
 
-def test_worker_run_once_processes_mock_report_update_and_bom_json(tmp_path: Path) -> None:
+def test_worker_run_once_processes_bom_stock_analysis_mock_task(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
     _write_factor_run(tmp_path, "factor_002_test")
-    _write_market_status_inputs(tmp_path)
     worker_config = tmp_path / "config" / "app-worker.yaml"
     worker_config.write_text("default_factor_run_id: factor_002_test\n", encoding="utf-8")
     mock_task = tmp_path / "task.json"
     mock_task.write_text(
-        "\ufeff" + json.dumps({"analysis_request": {"id": "request_002", "request_type": "report_update", "report_date": "2026-04-28"}}),
+        "\ufeff" + json.dumps({"analysis_request": {"id": "request_002", "request_type": "stock_analysis", "symbol": "600519.SH", "report_date": "2026-04-28"}}),
         encoding="utf-8",
     )
 
@@ -274,8 +277,43 @@ def test_worker_run_once_processes_mock_report_update_and_bom_json(tmp_path: Pat
     assert result.ok
     response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
     assert response["status"] == "completed"
-    assert response["result_artifact_json"]["bundle_metadata"]["schema_version"] == "daily_publish_bundle_v001"
-    assert response["result_artifact_json"]["candidate_pool"]["candidate_pool_metadata"]["schema_version"] == "candidate_pool_v001"
+    assert response["artifact_json"]["stock"]["symbol"] == "600519.SH"
+
+
+def test_daily_check_mock_uploads_bundle_and_skips_duplicate_hash(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+    _write_market_status_inputs(tmp_path)
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("worker_id: local-test-worker\ndefault_factor_run_id: factor_002_test\n", encoding="utf-8")
+    upload_path = tmp_path / "daily-upload.json"
+
+    first = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=2)
+    second = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=2)
+
+    assert first.ok
+    assert second.ok
+    assert "already uploaded" in second.message
+    response = json.loads(upload_path.read_text(encoding="utf-8"))
+    assert response["result_type"] == "daily_bundle"
+    assert response["worker_id"] == "local-test-worker"
+    assert response["schema_version"] == "daily_publish_bundle_v001"
+    assert response["artifact_json"]["candidate_pool"]["candidate_pool_metadata"]["schema_version"] == "candidate_pool_v001"
+    state = json.loads((tmp_path / "data" / "reports" / "app_worker" / "daily_upload_state.json").read_text(encoding="utf-8"))
+    assert state["daily_bundle_uploads"]["2026-04-28"]["artifact_hash"] == response["artifact_hash"]
+
+
+def test_daily_check_requires_factor_run_id(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("", encoding="utf-8")
+
+    result = run_daily_check(config_path, worker_config, mock_upload=True)
+
+    assert not result.ok
+    assert "requires factor_run_id" in result.message
 
 
 def test_worker_run_once_writes_failed_mock_results(tmp_path: Path) -> None:
@@ -399,6 +437,7 @@ def test_new_cli_help_commands_are_available(capsys) -> None:
         ["analysis", "stock", "--help"],
         ["workflow", "sync-report", "--help"],
         ["app-worker", "run-once", "--help"],
+        ["app-worker", "daily-check", "--help"],
     ]
 
     for command in commands:
@@ -413,6 +452,7 @@ def test_new_cli_help_commands_are_available(capsys) -> None:
     assert "stock-picker analysis stock" in output
     assert "stock-picker workflow sync-report" in output
     assert "stock-picker app-worker run-once" in output
+    assert "daily-check" in output
 
 
 def _write_storage_config(tmp_path: Path) -> Path:

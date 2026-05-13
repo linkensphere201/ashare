@@ -1,9 +1,9 @@
 const titles = {
   home: ['Home', 'Local workflow status and latest outputs.'],
   sync: ['Sync', 'Preflight local data gaps, then run confirmed workflows.'],
-  report: ['Daily Bundle', 'Build and manually publish market status plus candidate pool bundles.'],
+  report: ['Daily Bundle', 'Build and upload market status plus candidate pool bundles.'],
   analysis: ['Stock Analysis', 'Generate a structured research card for one symbol.'],
-  worker: ['Worker', 'Claim remote app tasks and execute them locally.'],
+  worker: ['Worker', 'Poll stock-analysis jobs and run daily bundle checks.'],
   logs: ['Logs', 'Workflow and command output.'],
   settings: ['Settings', 'Local runtime settings.']
 };
@@ -58,8 +58,8 @@ async function runMappedCommand(name) {
     return;
   }
   if (name === 'mock-upload') {
-    appendLog('Mock upload hook: validate generated daily bundle, then POST to /api/publish/daily-bundles when backend is available.\n');
-    await window.stockPicker.notify('Stock Picker', 'Mock upload completed');
+    await run(clean(['app-worker', 'daily-check', '--worker-config', value('#worker-config'), '--factor-run-id', value('#report-factor-run'), '--trade-date', value('#report-date'), '--top', value('#report-top'), '--mock-upload', ...args]));
+    await window.stockPicker.notify('Stock Picker', 'Daily bundle mock upload completed');
     return;
   }
   if (name === 'stock-analysis') {
@@ -72,6 +72,10 @@ async function runMappedCommand(name) {
   }
   if (name === 'worker-loop') {
     await run(clean(['app-worker', 'run', '--max-iterations', '1', '--worker-config', value('#worker-config'), ...args]));
+    return;
+  }
+  if (name === 'daily-check') {
+    await run(clean(['app-worker', 'daily-check', '--worker-config', value('#worker-config'), '--factor-run-id', value('#daily-factor-run'), '--trade-date', value('#daily-trade-date'), '--top', value('#daily-top'), '--mock-upload', ...args]));
   }
 }
 

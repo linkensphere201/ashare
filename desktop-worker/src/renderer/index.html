@@ -76,7 +76,7 @@
           </div>
           <div class="actions">
             <button data-command="build-artifact">Build daily bundle</button>
-            <button data-command="mock-upload">Manual upload to mock API</button>
+            <button data-command="mock-upload">Mock result upload</button>
           </div>
         </div>
       </section>
@@ -95,14 +95,25 @@
 
       <section id="worker" class="view">
         <div class="panel wide">
-          <h3>Remote task worker</h3>
+          <h3>Stock analysis worker</h3>
           <div class="form-grid">
             <label>Worker config <input id="worker-config" value="config/app-worker.yaml" /></label>
             <label>Mock task path <input id="mock-task" placeholder="optional mock task json" /></label>
           </div>
           <div class="actions">
-            <button data-command="worker-once">Run once</button>
-            <button data-command="worker-loop">Run loop once</button>
+            <button data-command="worker-once">Claim once</button>
+            <button data-command="worker-loop">Poll once</button>
+          </div>
+        </div>
+        <div class="panel wide">
+          <h3>Daily bundle check</h3>
+          <div class="form-grid">
+            <label>Factor run id <input id="daily-factor-run" /></label>
+            <label>Trade date <input id="daily-trade-date" placeholder="optional" /></label>
+            <label>Top N <input id="daily-top" type="number" value="10" /></label>
+          </div>
+          <div class="actions">
+            <button data-command="daily-check">Check and mock upload</button>
           </div>
         </div>
       </section>

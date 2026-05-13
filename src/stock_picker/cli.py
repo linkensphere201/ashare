@@ -12,7 +12,7 @@ import sys
 
 from stock_picker.config import StorageConfig, load_storage_config
 from stock_picker.analysis import analyze_stock
-from stock_picker.app_worker import run_worker_loop, run_worker_once
+from stock_picker.app_worker import run_daily_check, run_worker_loop, run_worker_once
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.factor_exploration import (
@@ -163,15 +163,27 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_pause_cmd.add_argument("--workflow-id", required=True)
     workflow_pause_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
-    app_worker_once_cmd = app_worker_subparsers.add_parser("run-once", help="Claim and process at most one app task")
+    app_worker_once_cmd = app_worker_subparsers.add_parser("run-once", help="Claim and process at most one app stock_analysis task")
     app_worker_once_cmd.add_argument("--worker-config", default="config/app-worker.yaml", help="Path to local worker config")
     app_worker_once_cmd.add_argument("--mock-task", help="Optional mock task JSON path")
     app_worker_once_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
-    app_worker_run_cmd = app_worker_subparsers.add_parser("run", help="Run the polling app worker loop")
+    app_worker_run_cmd = app_worker_subparsers.add_parser("run", help="Run the polling app stock_analysis worker loop")
     app_worker_run_cmd.add_argument("--worker-config", default="config/app-worker.yaml", help="Path to local worker config")
     app_worker_run_cmd.add_argument("--max-iterations", type=int, help="Optional max poll iterations")
     app_worker_run_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    app_worker_daily_cmd = app_worker_subparsers.add_parser("daily-check", help="Build and upload the daily bundle when ready")
+    app_worker_daily_cmd.add_argument("--worker-config", default="config/app-worker.yaml", help="Path to local worker config")
+    app_worker_daily_cmd.add_argument("--factor-run-id", help="Candidate 002 factor run id; defaults to worker config")
+    app_worker_daily_cmd.add_argument("--trade-date", help="Trade date; defaults to worker config or latest available data")
+    app_worker_daily_cmd.add_argument("--previous-candidate-pool", help="Previous candidate_pool_v001 JSON path")
+    app_worker_daily_cmd.add_argument("--previous-bundle", help="Previous daily_publish_bundle_v001 JSON path")
+    app_worker_daily_cmd.add_argument("--top", type=int, default=10, help="Candidate count")
+    app_worker_daily_cmd.add_argument("--force", action="store_true", help="Upload even if the same trade_date/hash was already uploaded")
+    app_worker_daily_cmd.add_argument("--mock-upload", action="store_true", help="Write the shared result upload payload locally instead of calling APP backend")
+    app_worker_daily_cmd.add_argument("--mock-upload-path", help="Optional local JSON path for --mock-upload")
+    app_worker_daily_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     factor_research_candidate_cmd = factor_subparsers.add_parser(
         "research-candidate-001",
@@ -821,6 +833,20 @@ def execute_command(args: argparse.Namespace, context: CliContext):
             context.config_path,
             worker_config_path=Path(args.worker_config),
             max_iterations=args.max_iterations,
+        )
+
+    if args.command == "app-worker" and args.app_worker_command == "daily-check":
+        return run_daily_check(
+            context.config_path,
+            worker_config_path=Path(args.worker_config),
+            factor_run_id=args.factor_run_id,
+            trade_date=args.trade_date,
+            previous_candidate_pool_path=Path(args.previous_candidate_pool) if args.previous_candidate_pool else None,
+            previous_bundle_path=Path(args.previous_bundle) if args.previous_bundle else None,
+            top=args.top,
+            force=args.force,
+            mock_upload=args.mock_upload,
+            mock_upload_path=Path(args.mock_upload_path) if args.mock_upload_path else None,
         )
 
     return CliCommandResult(False, "unsupported command", 2)
