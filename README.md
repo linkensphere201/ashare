@@ -486,7 +486,9 @@ New stock-app boundary commands:
 
 | Command | Purpose |
 | --- | --- |
-| `stock-picker publish build-report-artifact` | Build a versioned app-ingestable Candidate 002 publish artifact |
+| `stock-picker publish build-market-status` | Build the public `market_status_v001` payload |
+| `stock-picker publish build-candidate-pool` | Build the public `candidate_pool_v001` payload from Candidate 002 |
+| `stock-picker publish build-daily-bundle` | Build the uploadable `daily_publish_bundle_v001` containing market status and candidate pool |
 | `stock-picker analysis stock` | Build a structured specific-stock analysis artifact |
 | `stock-picker workflow sync-report` | Run the desktop sync/report workflow, with dry-run preflight by default |
 | `stock-picker workflow stock-analysis` | Run stock analysis through the workflow state/event layer |
@@ -498,13 +500,13 @@ New stock-app boundary commands:
 Examples:
 
 ```powershell
-stock-picker publish build-report-artifact --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --top 20
+stock-picker publish build-daily-bundle --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --top 10
 stock-picker analysis stock --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --symbol 600519.SH
 stock-picker workflow sync-report --config config/storage.yaml --dry-run --json-events
 stock-picker app-worker run-once --config config/storage.yaml --worker-config config/app-worker.yaml
 ```
 
-The first version uses mock worker tasks and local artifacts for tests. Real Tushare sync and real stock-app backend upload are not part of unit tests.
+The daily upload path is `daily_publish_bundle_v001`; the old broad publish artifact is not a supported product path. The first version uses mock worker tasks and local bundle files for tests. Real Tushare sync and real stock-app backend upload are not part of unit tests.
 
 ## Manual CSV Debug Path
 

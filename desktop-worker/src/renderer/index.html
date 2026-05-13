@@ -18,7 +18,7 @@
       <nav>
         <button class="nav active" data-view="home">Home</button>
         <button class="nav" data-view="sync">Sync</button>
-        <button class="nav" data-view="report">Report</button>
+        <button class="nav" data-view="report">Daily Bundle</button>
         <button class="nav" data-view="analysis">Stock Analysis</button>
         <button class="nav" data-view="worker">Worker</button>
         <button class="nav" data-view="logs">Logs</button>
@@ -50,7 +50,7 @@
 
       <section id="sync" class="view">
         <div class="panel wide">
-          <h3>Sync latest and generate report</h3>
+          <h3>Sync latest and generate daily bundle</h3>
           <div class="form-grid">
             <label>Start date <input id="sync-start" placeholder="2026-01-01" /></label>
             <label>End date <input id="sync-end" placeholder="2026-05-12" /></label>
@@ -67,7 +67,7 @@
 
       <section id="report" class="view">
         <div class="panel wide">
-          <h3>Build publish artifact</h3>
+          <h3>Build daily bundle</h3>
           <div class="form-grid">
             <label>Factor run id <input id="report-factor-run" /></label>
             <label>Trade date <input id="report-date" placeholder="optional" /></label>
@@ -75,7 +75,7 @@
             <label>Top N <input id="report-top" type="number" value="20" /></label>
           </div>
           <div class="actions">
-            <button data-command="build-artifact">Build artifact</button>
+            <button data-command="build-artifact">Build daily bundle</button>
             <button data-command="mock-upload">Manual upload to mock API</button>
           </div>
         </div>

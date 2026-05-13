@@ -12,7 +12,7 @@ import polars as pl
 
 from stock_picker.config import load_storage_config
 from stock_picker.factor_exploration import FACTOR_VERSION
-from stock_picker.publish import factor_definitions, validate_publish_artifact
+from stock_picker.publish import factor_definitions, validate_safe_payload
 
 
 @dataclass(frozen=True)
@@ -136,17 +136,7 @@ def _validate_stock_analysis(artifact: dict[str, Any]) -> list[str]:
     for section in ["analysis_metadata", "stock", "candidate_status", "factor_values", "risk_notes", "manual_review_questions"]:
         if section not in artifact:
             errors.append(f"missing section: {section}")
-    pseudo_publish = {
-        "publish_metadata": {"schema_version": "stock_app_publish_v001"},
-        "market_summary": {},
-        "candidate_pool": {},
-        "stock_cards": [artifact],
-        "factor_definitions": artifact.get("factor_definitions", []),
-        "factor_explanations": [],
-        "backtest_summary": {},
-        "data_quality": {},
-    }
-    return errors + [error for error in validate_publish_artifact(pseudo_publish) if not error.startswith("unsupported")]
+    return errors + validate_safe_payload(artifact)
 
 
 def _float(value: Any, default: float | None = 0.0) -> float | None:

@@ -1,7 +1,7 @@
 const titles = {
   home: ['Home', 'Local workflow status and latest outputs.'],
   sync: ['Sync', 'Preflight local data gaps, then run confirmed workflows.'],
-  report: ['Report', 'Build and manually publish app-ready artifacts.'],
+  report: ['Daily Bundle', 'Build and manually publish market status plus candidate pool bundles.'],
   analysis: ['Stock Analysis', 'Generate a structured research card for one symbol.'],
   worker: ['Worker', 'Claim remote app tasks and execute them locally.'],
   logs: ['Logs', 'Workflow and command output.'],
@@ -54,11 +54,11 @@ async function runMappedCommand(name) {
     return;
   }
   if (name === 'build-artifact') {
-    await run(clean(['publish', 'build-report-artifact', '--factor-run-id', value('#report-factor-run'), '--trade-date', value('#report-date'), '--output', value('#report-output'), '--top', value('#report-top'), ...args]));
+    await run(clean(['publish', 'build-daily-bundle', '--factor-run-id', value('#report-factor-run'), '--trade-date', value('#report-date'), '--output', value('#report-output'), '--top', value('#report-top'), ...args]));
     return;
   }
   if (name === 'mock-upload') {
-    appendLog('Mock upload hook: validate generated artifact, then POST to /api/publish/reports when backend is available.\n');
+    appendLog('Mock upload hook: validate generated daily bundle, then POST to /api/publish/daily-bundles when backend is available.\n');
     await window.stockPicker.notify('Stock Picker', 'Mock upload completed');
     return;
   }

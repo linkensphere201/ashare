@@ -1,0 +1,62 @@
+dataset_id: industry_classification
+dataset_name: Industry Classification
+layer: curated
+version: v001
+description: Shenwan industry classification metadata.
+primary_key:
+  - index_code
+fields:
+  - name: index_code
+    type: string
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Industry index code.
+  - name: industry_name
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Industry name.
+  - name: level
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Classification level, such as L1.
+  - name: source_system
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Classification system, such as SW2021.
+  - name: parent_code
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Parent industry code.
+  - name: source
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Data source.
+  - name: source_batch_id
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Raw batch id.
+  - name: data_version
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Curated version.
+  - name: created_at
+    type: datetime
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Creation timestamp.

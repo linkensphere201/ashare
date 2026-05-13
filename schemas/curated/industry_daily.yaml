@@ -1,0 +1,114 @@
+dataset_id: industry_daily
+dataset_name: Industry Daily
+layer: curated
+version: v001
+description: Shenwan industry index daily quotes.
+primary_key:
+  - index_code
+  - trade_date
+partition:
+  - trade_year
+  - trade_month
+fields:
+  - name: index_code
+    type: string
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Industry index code.
+  - name: trade_date
+    type: date
+    nullable: false
+    primary_key: true
+    partition_key: false
+    description: Trading date.
+  - name: industry_name
+    type: string
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Industry name.
+  - name: open
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Open price.
+  - name: high
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: High price.
+  - name: low
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Low price.
+  - name: close
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Close price.
+  - name: pre_close
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Previous close.
+  - name: pct_change
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Percentage change.
+  - name: volume
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Trading volume.
+  - name: amount
+    type: double
+    nullable: true
+    primary_key: false
+    partition_key: false
+    description: Trading amount.
+  - name: trade_year
+    type: integer
+    nullable: false
+    primary_key: false
+    partition_key: true
+    description: Physical partition year.
+  - name: trade_month
+    type: integer
+    nullable: false
+    primary_key: false
+    partition_key: true
+    description: Physical partition month.
+  - name: source
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Data source.
+  - name: source_batch_id
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Raw batch id.
+  - name: data_version
+    type: string
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Curated version.
+  - name: created_at
+    type: datetime
+    nullable: false
+    primary_key: false
+    partition_key: false
+    description: Creation timestamp.

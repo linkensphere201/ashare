@@ -11,7 +11,7 @@ from typing import Any, Callable
 from stock_picker.analysis import analyze_stock
 from stock_picker.config import load_storage_config
 from stock_picker.factor_exploration import backtest_candidate_002, compute_daily_factors, rank_candidate_002
-from stock_picker.publish import build_report_artifact
+from stock_picker.publish import build_daily_bundle
 from stock_picker.quality import check_curated_quality
 from stock_picker.snapshot import create_snapshot
 from stock_picker.sync import sync_latest
@@ -114,11 +114,11 @@ def sync_report_workflow(
     backtest = _run_step(state_path, state, "backtest_candidate_002", emit, lambda: backtest_candidate_002(config_path, selected_factor_run, top=min(10, top), rebalance="weekly"))
     if not backtest.ok:
         return _fail(selected_id, state_path, backtest.message, state, emit)
-    publish = _run_step(state_path, state, "build_publish_artifact", emit, lambda: build_report_artifact(config_path, selected_factor_run, trade_date=end_date, top=top))
+    publish = _run_step(state_path, state, "build_daily_bundle", emit, lambda: build_daily_bundle(config_path, selected_factor_run, trade_date=end_date, top=top))
     if not publish.ok:
         return _fail(selected_id, state_path, publish.message, state, emit)
     state["status"] = "completed"
-    state["artifacts"]["publish"] = str(getattr(publish, "artifact_path", "") or "")
+    state["artifacts"]["daily_bundle"] = str(getattr(publish, "artifact_path", "") or "")
     state["updated_at"] = _now()
     _write_state(state_path, state)
     _event(emit, state, "workflow_completed", "sync report workflow completed")

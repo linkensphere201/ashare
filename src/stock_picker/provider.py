@@ -56,6 +56,8 @@ TUSHARE_SUPPORTED_DATASETS = {
     "suspend_d",
     "moneyflow_dc",
     "cyq_perf",
+    "index_classify",
+    "sw_daily",
 }
 
 MARKET_DAILY_DATASETS = {"daily_prices", "moneyflow_dc"}
@@ -73,6 +75,8 @@ TUSHARE_EXPECTED_FIELDS = {
     "moneyflow_dc": {"ts_code", "trade_date", "net_amount", "net_amount_rate"},
     "moneyflow_ths": {"ts_code", "trade_date", "net_d5_amount"},
     "cyq_perf": {"ts_code", "trade_date", "winner_rate"},
+    "index_classify": {"index_code", "industry_name", "level"},
+    "sw_daily": {"ts_code", "trade_date", "close", "pct_change"},
 }
 
 
@@ -782,6 +786,15 @@ def _fetch_tushare_dataset(
             start_date=_compact_date(start_date),
             end_date=_compact_date(end_date),
         )
+    elif dataset == "index_classify":
+        pandas_frame = pro.index_classify(level="L1", src="SW2021")
+    elif dataset == "sw_daily":
+        pandas_frame = pro.sw_daily(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
     else:
         pandas_frame = pro.cyq_perf(
             ts_code=ts_code,
@@ -1380,6 +1393,15 @@ def _probe_tushare_api(
         )
     elif api == "moneyflow_ths":
         pandas_frame = pro.moneyflow_ths(
+            ts_code=ts_code,
+            trade_date=_compact_date(trade_date),
+            start_date=_compact_date(start_date),
+            end_date=_compact_date(end_date),
+        )
+    elif api == "index_classify":
+        pandas_frame = pro.index_classify(level="L1", src="SW2021")
+    elif api == "sw_daily":
+        pandas_frame = pro.sw_daily(
             ts_code=ts_code,
             trade_date=_compact_date(trade_date),
             start_date=_compact_date(start_date),

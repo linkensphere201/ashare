@@ -23,7 +23,7 @@ from stock_picker.factor_exploration import (
 )
 from stock_picker.factor_research import research_candidate_001
 from stock_picker.provider import fetch_cyq_perf_batch, fetch_provider_raw, probe_provider_api, run_cyq_perf_batches, run_market_daily
-from stock_picker.publish import build_report_artifact
+from stock_picker.publish import build_candidate_pool, build_daily_bundle, build_market_status
 from stock_picker.quality import check_curated_quality
 from stock_picker.reports import show_report
 from stock_picker.snapshot import create_snapshot, inspect_snapshot
@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     reports = subparsers.add_parser("reports", help="Display generated reports")
     reports_subparsers = reports.add_subparsers(dest="reports_command", required=True)
 
-    publish = subparsers.add_parser("publish", help="Build commercial app publish artifacts")
+    publish = subparsers.add_parser("publish", help="Build commercial app daily bundle payloads")
     publish_subparsers = publish.add_subparsers(dest="publish_command", required=True)
 
     analysis = subparsers.add_parser("analysis", help="Build commercial app analysis outputs")
@@ -88,16 +88,37 @@ def build_parser() -> argparse.ArgumentParser:
     show_report_cmd.add_argument("--limit", type=int, default=10, help="Maximum rows per displayed table")
     show_report_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
-    publish_artifact_cmd = publish_subparsers.add_parser(
-        "build-report-artifact",
-        help="Build a versioned stock-app publish artifact from a Candidate 002 factor run",
+    market_status_cmd = publish_subparsers.add_parser(
+        "build-market-status",
+        help="Build the customer-facing market_status_v001 payload",
     )
-    publish_artifact_cmd.add_argument("--factor-run-id", required=True, help="Candidate 002 factor run id")
-    publish_artifact_cmd.add_argument("--trade-date", help="Report date; defaults to latest factor date")
-    publish_artifact_cmd.add_argument("--previous-artifact", help="Optional previous publish artifact path for change labels")
-    publish_artifact_cmd.add_argument("--output", help="Output JSON path")
-    publish_artifact_cmd.add_argument("--top", type=int, default=20, help="Candidate count")
-    publish_artifact_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+    market_status_cmd.add_argument("--trade-date", help="Trade date; defaults to latest available date")
+    market_status_cmd.add_argument("--output", help="Output JSON path")
+    market_status_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    candidate_pool_cmd = publish_subparsers.add_parser(
+        "build-candidate-pool",
+        help="Build the customer-facing candidate_pool_v001 payload",
+    )
+    candidate_pool_cmd.add_argument("--factor-run-id", required=True, help="Candidate 002 factor run id")
+    candidate_pool_cmd.add_argument("--trade-date", help="Trade date; defaults to latest factor date")
+    candidate_pool_cmd.add_argument("--previous-candidate-pool", help="Previous candidate_pool_v001 JSON path")
+    candidate_pool_cmd.add_argument("--previous-bundle", help="Previous daily_publish_bundle_v001 JSON path")
+    candidate_pool_cmd.add_argument("--output", help="Output JSON path")
+    candidate_pool_cmd.add_argument("--top", type=int, default=10, help="Candidate count")
+    candidate_pool_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
+    daily_bundle_cmd = publish_subparsers.add_parser(
+        "build-daily-bundle",
+        help="Build the daily_publish_bundle_v001 payload",
+    )
+    daily_bundle_cmd.add_argument("--factor-run-id", required=True, help="Candidate 002 factor run id")
+    daily_bundle_cmd.add_argument("--trade-date", help="Trade date; defaults to latest available date")
+    daily_bundle_cmd.add_argument("--previous-candidate-pool", help="Previous candidate_pool_v001 JSON path")
+    daily_bundle_cmd.add_argument("--previous-bundle", help="Previous daily_publish_bundle_v001 JSON path")
+    daily_bundle_cmd.add_argument("--output", help="Output JSON path")
+    daily_bundle_cmd.add_argument("--top", type=int, default=10, help="Candidate count")
+    daily_bundle_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     analysis_stock_cmd = analysis_subparsers.add_parser(
         "stock",
@@ -111,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     workflow_sync_cmd = workflow_subparsers.add_parser(
         "sync-report",
-        help="Run the desktop sync-latest -> report artifact workflow",
+        help="Run the desktop sync-latest -> daily bundle workflow",
     )
     workflow_sync_cmd.add_argument("--workflow-id", help="Stable workflow id for resume/status")
     workflow_sync_cmd.add_argument("--dry-run", action="store_true", help="Only inspect missing data")
@@ -721,12 +742,31 @@ def execute_command(args: argparse.Namespace, context: CliContext):
             limit=args.limit,
         )
 
-    if args.command == "publish" and args.publish_command == "build-report-artifact":
-        return build_report_artifact(
+    if args.command == "publish" and args.publish_command == "build-market-status":
+        return build_market_status(
+            context.config_path,
+            trade_date=args.trade_date,
+            output_path=Path(args.output) if args.output else None,
+        )
+
+    if args.command == "publish" and args.publish_command == "build-candidate-pool":
+        return build_candidate_pool(
             context.config_path,
             factor_run_id=args.factor_run_id,
             trade_date=args.trade_date,
-            previous_artifact_path=Path(args.previous_artifact) if args.previous_artifact else None,
+            previous_candidate_pool_path=Path(args.previous_candidate_pool) if args.previous_candidate_pool else None,
+            previous_bundle_path=Path(args.previous_bundle) if args.previous_bundle else None,
+            output_path=Path(args.output) if args.output else None,
+            top=args.top,
+        )
+
+    if args.command == "publish" and args.publish_command == "build-daily-bundle":
+        return build_daily_bundle(
+            context.config_path,
+            factor_run_id=args.factor_run_id,
+            trade_date=args.trade_date,
+            previous_candidate_pool_path=Path(args.previous_candidate_pool) if args.previous_candidate_pool else None,
+            previous_bundle_path=Path(args.previous_bundle) if args.previous_bundle else None,
             output_path=Path(args.output) if args.output else None,
             top=args.top,
         )

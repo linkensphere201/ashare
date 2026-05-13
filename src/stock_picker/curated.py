@@ -40,6 +40,8 @@ RAW_TO_CURATED_DATASET = {
     "suspend_d": "daily_prices",
     "moneyflow_dc": "capital_flow_or_chip",
     "cyq_perf": "capital_flow_or_chip",
+    "index_classify": "industry_classification",
+    "sw_daily": "industry_daily",
 }
 SUPPLEMENTAL_DAILY_PRICE_DATASETS = {"adj_factor", "daily_basic", "stk_limit"}
 
@@ -789,6 +791,41 @@ def _map_tushare_raw_to_curated(frame: pl.DataFrame, dataset: str) -> pl.DataFra
                 data_method.alias("data_method"),
             ]
         ).select(["symbol", "trade_date", "close_profit_ratio", "data_method"])
+    if dataset == "index_classify":
+        parent_expr = pl.col("parent_code") if "parent_code" in frame.columns else pl.lit(None)
+        src_expr = pl.col("src") if "src" in frame.columns else pl.lit("SW2021")
+        return frame.with_columns(
+            [
+                pl.col("index_code").alias("index_code"),
+                pl.col("industry_name").alias("industry_name"),
+                pl.col("level").alias("level"),
+                src_expr.alias("source_system"),
+                parent_expr.alias("parent_code"),
+            ]
+        ).select(["index_code", "industry_name", "level", "source_system", "parent_code"])
+    if dataset == "sw_daily":
+        name_expr = pl.col("name").alias("industry_name") if "name" in frame.columns else pl.lit(None).alias("industry_name")
+        open_expr = pl.col("open").alias("open") if "open" in frame.columns else pl.lit(None).alias("open")
+        high_expr = pl.col("high").alias("high") if "high" in frame.columns else pl.lit(None).alias("high")
+        low_expr = pl.col("low").alias("low") if "low" in frame.columns else pl.lit(None).alias("low")
+        volume_expr = pl.col("vol").alias("volume") if "vol" in frame.columns else pl.lit(None).alias("volume")
+        amount_expr = pl.col("amount").alias("amount") if "amount" in frame.columns else pl.lit(None).alias("amount")
+        pct_change_expr = pl.col("pct_change").alias("pct_change") if "pct_change" in frame.columns else pl.col("pct_chg").alias("pct_change")
+        pre_close_expr = pl.col("pre_close").alias("pre_close") if "pre_close" in frame.columns else pl.lit(None).alias("pre_close")
+        return frame.with_columns(
+            [
+                pl.col("ts_code").alias("index_code"),
+                _parse_yyyymmdd("trade_date").alias("trade_date"),
+                name_expr,
+                open_expr,
+                high_expr,
+                low_expr,
+                pct_change_expr,
+                pre_close_expr,
+                volume_expr,
+                amount_expr,
+            ]
+        ).select(["index_code", "trade_date", "industry_name", "open", "high", "low", "close", "pre_close", "pct_change", "volume", "amount"])
     raise ValueError(f"unsupported raw dataset mapping: {dataset}")
 
 

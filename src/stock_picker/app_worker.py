@@ -13,7 +13,7 @@ from typing import Any
 
 from stock_picker.analysis import analyze_stock
 from stock_picker.config import load_storage_config
-from stock_picker.publish import build_report_artifact
+from stock_picker.publish import build_daily_bundle
 
 
 @dataclass(frozen=True)
@@ -74,7 +74,13 @@ def run_worker_once(config_path: Path, worker_config_path: Path, mock_task_path:
             factor_run_id = str(task.get("factor_run_id") or worker_config.default_factor_run_id or "")
             if not factor_run_id:
                 raise ValueError("report_update task requires factor_run_id or worker default_factor_run_id in first version")
-            result = build_report_artifact(config_path, factor_run_id=factor_run_id, trade_date=task.get("report_date") or worker_config.default_trade_date)
+            result = build_daily_bundle(
+                config_path,
+                factor_run_id=factor_run_id,
+                trade_date=task.get("report_date") or worker_config.default_trade_date,
+                previous_bundle_path=Path(task["previous_bundle_path"]) if task.get("previous_bundle_path") else None,
+                previous_candidate_pool_path=Path(task["previous_candidate_pool_path"]) if task.get("previous_candidate_pool_path") else None,
+            )
             payload = result.artifact
         else:
             raise ValueError(f"unsupported request_type: {request_type}")
@@ -84,9 +90,9 @@ def run_worker_once(config_path: Path, worker_config_path: Path, mock_task_path:
             "status": "completed",
             "result_artifact_json": payload,
             "warnings_json": [],
-            "source_snapshot_id": (payload or {}).get("publish_metadata", {}).get("source_snapshot_id") or (payload or {}).get("analysis_metadata", {}).get("source_snapshot_id"),
-            "source_strategy_version": (payload or {}).get("publish_metadata", {}).get("source_strategy_version") or (payload or {}).get("analysis_metadata", {}).get("source_strategy_version"),
-            "generated_at": (payload or {}).get("publish_metadata", {}).get("generated_at") or (payload or {}).get("analysis_metadata", {}).get("generated_at"),
+            "source_snapshot_id": _source_snapshot_id(payload),
+            "source_strategy_version": _source_strategy_version(payload),
+            "generated_at": _generated_at(payload),
         }
         _submit_result(worker_config, request_id, response, mock_task_path)
         return WorkerResult(True, f"worker completed task: {request_id}")
@@ -111,7 +117,7 @@ def _claim_task(config: WorkerConfig) -> dict[str, Any] | None:
     response = _request_json(
         config,
         "/api/worker/analysis-requests/claim",
-        {"worker_id": config.worker_id, "capabilities": {"request_types": ["report_update", "stock_analysis"], "artifact_schema_versions": ["stock_app_publish_v001", "stock_app_stock_analysis_v001"]}},
+        {"worker_id": config.worker_id, "capabilities": {"request_types": ["report_update", "stock_analysis"], "artifact_schema_versions": ["daily_publish_bundle_v001", "stock_app_stock_analysis_v001"]}},
     )
     return response.get("analysis_request")
 
@@ -119,7 +125,7 @@ def _claim_task(config: WorkerConfig) -> dict[str, Any] | None:
 def _submit_result(config: WorkerConfig, request_id: str, payload: dict[str, Any], mock_task_path: Path | None = None) -> None:
     if mock_task_path:
         result_path = mock_task_path.with_suffix(".result.json")
-        result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
         return
     _request_json(config, f"/api/worker/analysis-requests/{request_id}/result", payload)
 
@@ -128,7 +134,7 @@ def _request_json(config: WorkerConfig, path: str, payload: dict[str, Any]) -> d
     token = os.environ.get(config.worker_token_env)
     if not token:
         raise ValueError(f"missing required environment variable: {config.worker_token_env}")
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     request = urllib.request.Request(
         config.app_base_url + path,
         data=data,
@@ -149,6 +155,27 @@ def _load_mock_task(path: Path | None) -> dict[str, Any] | None:
         return None
     payload = json.loads(path.read_text(encoding="utf-8-sig"))
     return payload.get("analysis_request", payload)
+
+
+def _source_snapshot_id(payload: dict[str, Any] | None) -> str | None:
+    payload = payload or {}
+    return (
+        payload.get("bundle_metadata", {}).get("source_snapshot_id")
+        or payload.get("analysis_metadata", {}).get("source_snapshot_id")
+    )
+
+
+def _source_strategy_version(payload: dict[str, Any] | None) -> str | None:
+    payload = payload or {}
+    return (
+        payload.get("candidate_pool", {}).get("candidate_pool_metadata", {}).get("strategy_version")
+        or payload.get("analysis_metadata", {}).get("source_strategy_version")
+    )
+
+
+def _generated_at(payload: dict[str, Any] | None) -> str | None:
+    payload = payload or {}
+    return payload.get("bundle_metadata", {}).get("generated_at") or payload.get("analysis_metadata", {}).get("generated_at")
 
 
 def _simple_yaml(path: Path) -> dict[str, Any]:
