@@ -11,6 +11,7 @@ let stopAfterCurrent = false;
 let workerState = defaultWorkerState();
 let timers = [];
 const retryState = new Map();
+const notificationState = new Map();
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 
@@ -62,7 +63,7 @@ function showWindow() {
 }
 
 function portableRoot() {
-  if (app.isPackaged) return path.dirname(process.execPath);
+  if (app.isPackaged) return process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
   return repoRoot;
 }
 
@@ -114,13 +115,6 @@ function loadSettings() {
   const config = parseWorkerYaml(fs.readFileSync(configPaths().appWorker, 'utf8'));
   return {
     appBaseUrl: config.app_base_url || 'http://127.0.0.1:3000',
-    workerTokenEnv: config.worker_token_env || 'STOCK_APP_WORKER_TOKEN',
-    tushareTokenEnv: config.tushare_token_env || 'TUSHARE_TOKEN',
-    analysisClaimPath: config.analysis_claim_path || '/api/worker/analysis-requests/claim',
-    analysisResultPath: config.analysis_result_path_template || '/api/worker/analysis-requests/{requestId}/result',
-    dailyBundlePublishPath: config.daily_bundle_publish_path || '/api/publish/daily-bundles',
-    holdingWatchlistPath: config.holding_watchlist_path || '/api/worker/holding-prices/watchlist',
-    holdingPricesPath: config.holding_prices_path || '/api/worker/holding-prices',
     stockAnalysisEnabled: config.stock_analysis_enabled !== false,
     dailyBundleEnabled: config.daily_bundle_enabled !== false,
     holdingPriceEnabled: config.holding_price_enabled !== false,
@@ -130,31 +124,29 @@ function loadSettings() {
     earliestDailyPublishTime: config.earliest_daily_publish_time || '16:30',
     root: configPaths().root,
     appWorkerPath: configPaths().appWorker,
-    storagePath: configPaths().storage,
+    storagePath: config.storage_config_path || configPaths().storage,
     envPath: configPaths().env
   };
 }
 
 function saveSettings(settings) {
   ensurePortableFiles();
-  if (!String(settings.analysisResultPath || '').includes('{requestId}')) {
-    throw new Error('analysis result path must contain {requestId}');
-  }
   const yaml = [
     `app_base_url: ${settings.appBaseUrl || 'http://127.0.0.1:3000'}`,
+    `storage_config_path: ${settings.storagePath || configPaths().storage}`,
     'worker_id: local-worker',
-    `worker_token_env: ${settings.workerTokenEnv || 'STOCK_APP_WORKER_TOKEN'}`,
-    `tushare_token_env: ${settings.tushareTokenEnv || 'TUSHARE_TOKEN'}`,
+    'worker_token_env: STOCK_APP_WORKER_TOKEN',
+    'tushare_token_env: TUSHARE_TOKEN',
     `poll_interval_seconds: ${Number(settings.stockAnalysisPollSeconds || 15)}`,
     `holding_price_poll_interval_seconds: ${Number(settings.holdingPricePollSeconds || 300)}`,
     `daily_bundle_check_interval_seconds: ${Number(settings.dailyBundleCheckSeconds || 900)}`,
     `earliest_daily_publish_time: "${settings.earliestDailyPublishTime || '16:30'}"`,
     'api_paths:',
-    `  analysis_claim: ${settings.analysisClaimPath || '/api/worker/analysis-requests/claim'}`,
-    `  analysis_result: ${settings.analysisResultPath || '/api/worker/analysis-requests/{requestId}/result'}`,
-    `  daily_bundle_publish: ${settings.dailyBundlePublishPath || '/api/publish/daily-bundles'}`,
-    `  holding_watchlist: ${settings.holdingWatchlistPath || '/api/worker/holding-prices/watchlist'}`,
-    `  holding_prices: ${settings.holdingPricesPath || '/api/worker/holding-prices'}`,
+    '  analysis_claim: /api/worker/analysis-requests/claim',
+    '  analysis_result: /api/worker/analysis-requests/{requestId}/result',
+    '  daily_bundle_publish: /api/publish/daily-bundles',
+    '  holding_watchlist: /api/worker/holding-prices/watchlist',
+    '  holding_prices: /api/worker/holding-prices',
     'tasks:',
     '  stock_analysis:',
     `    enabled: ${settings.stockAnalysisEnabled !== false}`,
@@ -239,7 +231,7 @@ function pythonCommand(args, eventChannel, taskType) {
     setWorkerState({ running: workerRunning, taskType, status: 'running', step: 'starting', message: `stock-picker ${args.join(' ')}`, lastError: null });
     activeProcess = spawn(runtime.command, [...runtime.args, ...args], {
       cwd: app.isPackaged ? paths.root : repoRoot,
-      env: { ...process.env, ...env },
+      env: { ...process.env, ...env, PYTHONUNBUFFERED: '1' },
       windowsHide: true
     });
     let output = '';
@@ -275,6 +267,8 @@ function parseJsonEvents(text) {
     try {
       const parsed = JSON.parse(line);
       mainWindow?.webContents.send('workflow-event', parsed);
+      appendLog(formatWorkflowEvent(parsed));
+      notifyWorkflowEvent(parsed);
       setWorkerState({
         taskType: parsed.task_type || parsed.workflow_id || workerState.taskType,
         status: parsed.status || workerState.status,
@@ -288,6 +282,36 @@ function parseJsonEvents(text) {
       // Keep non-event lines in the plain log.
     }
   }
+}
+
+function formatWorkflowEvent(event) {
+  const task = event.task_type || event.workflow_id || 'workflow';
+  const step = event.step ? ` ${event.step}` : '';
+  const progress = event.step_index && event.step_total ? ` ${event.step_index}/${event.step_total}` : '';
+  const status = event.status || event.event || 'event';
+  const message = event.message || '';
+  return `[${new Date().toLocaleTimeString()}] ${task}${step}${progress} ${status}: ${message}\n`;
+}
+
+function notifyWorkflowEvent(event) {
+  if (!Notification.isSupported()) return;
+  const status = String(event.status || event.event || '');
+  const key = `${event.task_type || event.workflow_id || 'workflow'}:${event.step || ''}:${status}`;
+  const important = /started|running|progress|completed|failed|skipped/.test(status) || /workflow_|step_/.test(String(event.event || ''));
+  if (!important) return;
+  const now = Date.now();
+  const last = notificationState.get(key) || 0;
+  const isTerminal = /completed|failed|skipped/.test(status) || /completed|failed/.test(String(event.event || ''));
+  if (!isTerminal && now - last < 30000) return;
+  notificationState.set(key, now);
+  const title = status.includes('failed') || String(event.event || '').includes('failed')
+    ? 'Stock Picker task failed'
+    : status.includes('completed') || String(event.event || '').includes('completed')
+      ? 'Stock Picker task completed'
+      : 'Stock Picker task update';
+  const step = event.step ? `${event.step}: ` : '';
+  const body = `${step}${event.message || status}`.slice(0, 180);
+  new Notification({ title, body }).show();
 }
 
 function loadEnv(envPath) {
@@ -387,11 +411,11 @@ function clearTimers() {
 }
 
 function runAnalysisPoll() {
-  return pythonCommand(['app-worker', 'run-once', '--worker-config', configPaths().appWorker, '--config', configPaths().storage], 'command-log', 'stock_analysis');
+  return pythonCommand(['app-worker', 'run-once', '--worker-config', configPaths().appWorker, '--config', loadSettings().storagePath], 'command-log', 'stock_analysis');
 }
 
 function runHoldingRefresh() {
-  return pythonCommand(['app-worker', 'refresh-holding-prices', '--worker-config', configPaths().appWorker, '--config', configPaths().storage], 'command-log', 'holding_prices');
+  return pythonCommand(['app-worker', 'refresh-holding-prices', '--worker-config', configPaths().appWorker, '--config', loadSettings().storagePath], 'command-log', 'holding_prices');
 }
 
 function runDailyCheck() {
@@ -400,7 +424,7 @@ function runDailyCheck() {
     setWorkerState({ taskType: 'daily_bundle', status: 'waiting_for_publish_window', message: `Waiting for ${settings.earliestDailyPublishTime}` });
     return Promise.resolve({ ok: true, code: 0, output: '', errorOutput: '' });
   }
-  return pythonCommand(['app-worker', 'daily-check', '--worker-config', configPaths().appWorker, '--config', configPaths().storage, '--auto-pipeline', '--json-events'], 'command-log', 'daily_bundle');
+  return pythonCommand(['app-worker', 'daily-check', '--worker-config', configPaths().appWorker, '--config', settings.storagePath, '--auto-pipeline', '--json-events'], 'command-log', 'daily_bundle');
 }
 
 function isAfterTime(value) {

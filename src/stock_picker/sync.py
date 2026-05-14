@@ -87,6 +87,7 @@ def sync_latest(
     initialize_metadata_catalog(config.metadata_sqlite_path)
     today = end_date or date.today().isoformat()
     calendar_start = _calendar_fetch_start(config.current_curated_root / "trading_calendar" / "part-000.parquet", today, calendar_lookback_days)
+    _progress(progress_callback, f"sync_latest: fetching trading calendar {calendar_start}..{today}")
 
     try:
         provider_calendar = _fetch_tushare_dataset(
@@ -106,6 +107,7 @@ def sync_latest(
     if not provider_open_dates:
         return SyncLatestResult(False, f"provider calendar returned no trading days through {today}")
     latest_trade_date = max(provider_open_dates)
+    _progress(progress_callback, f"sync_latest: provider latest trading day {latest_trade_date}")
 
     local_calendar_dates = _local_trading_dates(config.current_curated_root / "trading_calendar" / "part-000.parquet")
     all_calendar_dates = sorted(set(local_calendar_dates) | set(provider_open_dates))
@@ -131,6 +133,7 @@ def sync_latest(
     if dry_run:
         return SyncLatestResult(True, "\n".join(lines + ["dry_run: no data fetched or promoted"]))
 
+    _progress(progress_callback, "sync_latest: writing and promoting trading calendar")
     calendar_batch = write_raw_batch(
         config_path=config_path,
         source=source,
@@ -154,6 +157,7 @@ def sync_latest(
     if market_datasets:
         market_missing = sorted({value for dataset in market_datasets for value in missing_by_dataset[dataset]})
         market_run_id = f"{run_id_prefix}_market_daily_{latest_trade_date.replace('-', '')}"
+        _progress(progress_callback, f"sync_latest: running market daily {market_missing[0]}..{market_missing[-1]} datasets={','.join(market_datasets)}")
         market_result = run_market_daily(
             config_path=config_path,
             source=source,
@@ -175,6 +179,7 @@ def sync_latest(
         lines.append(market_result.message)
         if not market_result.ok:
             return SyncLatestResult(False, "\n".join(lines))
+        _progress(progress_callback, f"sync_latest: promoting market daily run {market_run_id}")
         market_promote = promote_raw_run(config_path=config_path, run_id=market_run_id)
         lines.append(market_promote.message)
         if not market_promote.ok:
@@ -183,6 +188,7 @@ def sync_latest(
     if "cyq_perf" in selected_datasets and missing_by_dataset.get("cyq_perf"):
         cyq_missing = missing_by_dataset["cyq_perf"]
         cyq_run_id = f"{run_id_prefix}_cyq_perf_{latest_trade_date.replace('-', '')}"
+        _progress(progress_callback, f"sync_latest: running cyq_perf {cyq_missing[0]}..{cyq_missing[-1]}")
         cyq_result = run_cyq_perf_batches(
             config_path=config_path,
             source=source,
@@ -203,12 +209,14 @@ def sync_latest(
         lines.append(cyq_result.message)
         if not cyq_result.ok:
             return SyncLatestResult(False, "\n".join(lines))
+        _progress(progress_callback, f"sync_latest: promoting cyq_perf run {cyq_run_id}")
         cyq_promote = promote_raw_run(config_path=config_path, run_id=cyq_run_id, dataset="cyq_perf")
         lines.append(cyq_promote.message)
         if not cyq_promote.ok:
             return SyncLatestResult(False, "\n".join(lines))
 
     for dataset in [value for value in selected_datasets if value in SUPPLEMENTAL_SYNC_DATASETS and missing_by_dataset[value]]:
+        _progress(progress_callback, f"sync_latest: syncing {dataset} dates={len(missing_by_dataset[dataset])}")
         result = _sync_range_dataset(
             config_path=config_path,
             source=source,
@@ -223,6 +231,7 @@ def sync_latest(
 
     if "index_daily" in selected_datasets and missing_by_dataset.get("index_daily"):
         for symbol in selected_benchmark_symbols:
+            _progress(progress_callback, f"sync_latest: syncing index_daily {symbol} dates={len(missing_by_dataset['index_daily'])}")
             result = _sync_range_dataset(
                 config_path=config_path,
                 source=source,
@@ -236,12 +245,14 @@ def sync_latest(
             if not result.ok:
                 return SyncLatestResult(False, "\n".join(lines))
 
+    _progress(progress_callback, "sync_latest: running quality check")
     quality = check_curated_quality(config_path)
     lines.append(quality.message)
     if not quality.ok:
         return SyncLatestResult(False, "\n".join(lines))
 
     if create_snapshot_after:
+        _progress(progress_callback, f"sync_latest: creating snapshot for {latest_trade_date}")
         snapshot = create_snapshot(
             config_path=config_path,
             as_of_date=latest_trade_date,
@@ -252,6 +263,11 @@ def sync_latest(
             return SyncLatestResult(False, "\n".join(lines))
 
     return SyncLatestResult(True, "\n".join(lines))
+
+
+def _progress(callback, message: str) -> None:
+    if callback:
+        callback(message)
 
 
 def _calendar_fetch_start(calendar_path: Path, end_date: str, lookback_days: int) -> str:

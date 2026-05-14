@@ -62,18 +62,12 @@
 
       <section id="sync" class="view">
         <div class="panel wide">
-          <h3>Sync latest and generate daily bundle</h3>
-          <div class="form-grid">
-            <label>Start date <input id="sync-start" placeholder="2026-01-01" /></label>
-            <label>End date <input id="sync-end" placeholder="2026-05-12" /></label>
-            <label>Factor run id <input id="sync-factor-run" placeholder="optional" /></label>
-            <label>Top N <input id="sync-top" type="number" value="10" /></label>
-          </div>
+          <h3>Run daily bundle pipeline</h3>
           <div class="actions">
-            <button data-command="sync-dry-run">Preflight</button>
-            <button data-command="sync-confirm">Run confirmed workflow</button>
+            <button data-command="sync-daily-bundle">Run Daily Bundle</button>
           </div>
-          <p class="hint">Real sync is blocked behind preflight and explicit confirmation.</p>
+          <p class="hint">Runs the fixed daily flow: reuse uploaded bundle if unchanged, reuse local results when available, otherwise sync data, compute Candidate 002, build, validate, and upload.</p>
+          <pre id="sync-output"></pre>
         </div>
       </section>
 
@@ -132,7 +126,6 @@
           <h3>Holding price refresh</h3>
           <div class="form-grid">
             <label>Trade date <input id="holding-trade-date" placeholder="optional" /></label>
-            <label>Tushare token env <input id="holding-token-env" value="TUSHARE_TOKEN" /></label>
             <label>Mock watchlist <input id="holding-watchlist" placeholder="optional mock watchlist json" /></label>
             <label>Mock upload path <input id="holding-upload-path" placeholder="optional local output json" /></label>
           </div>
@@ -155,13 +148,6 @@
           <div class="form-grid">
             <label>Storage config <input id="storage-config" value="config/storage.yaml" /></label>
             <label>App base URL <input id="settings-app-base-url" value="http://127.0.0.1:3000" /></label>
-            <label>Worker token env <input id="settings-worker-token-env" value="STOCK_APP_WORKER_TOKEN" /></label>
-            <label>Tushare token env <input id="settings-tushare-token-env" value="TUSHARE_TOKEN" /></label>
-            <label>Analysis claim path <input id="settings-analysis-claim" /></label>
-            <label>Analysis result path <input id="settings-analysis-result" /></label>
-            <label>Daily publish path <input id="settings-daily-publish" /></label>
-            <label>Holding watchlist path <input id="settings-holding-watchlist" /></label>
-            <label>Holding prices path <input id="settings-holding-prices" /></label>
             <label>Analysis poll seconds <input id="settings-analysis-poll" type="number" value="15" /></label>
             <label>Daily check seconds <input id="settings-daily-check" type="number" value="900" /></label>
             <label>Daily earliest time <input id="settings-daily-time" value="16:30" /></label>

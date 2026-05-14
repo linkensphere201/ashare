@@ -86,7 +86,22 @@ def sync_report_workflow(
         _write_state(state_path, state)
         return WorkflowResult(result.ok, result.message, selected_id, state_path)
 
-    sync_result = _run_step(state_path, state, "sync_latest", emit, lambda: sync_latest(config_path=config_path, start_date=start_date, end_date=end_date, dry_run=False, create_snapshot_after=True))
+    sync_result = _run_step(
+        state_path,
+        state,
+        "sync_latest",
+        emit,
+        lambda: sync_latest(
+            config_path=config_path,
+            start_date=start_date,
+            end_date=end_date,
+            dry_run=False,
+            create_snapshot_after=True,
+            progress_every_tasks=10,
+            progress_every_batches=1,
+            progress_callback=lambda message: _event(emit, state, "step_progress", message),
+        ),
+    )
     if not sync_result.ok:
         return _fail(selected_id, state_path, sync_result.message, state, emit)
     quality = _run_step(state_path, state, "quality_check", emit, lambda: check_curated_quality(config_path))

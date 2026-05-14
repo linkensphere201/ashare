@@ -1,6 +1,6 @@
 const titles = {
   home: ['Home', 'Local workflow status and latest outputs.'],
-  sync: ['Sync', 'Preflight local data gaps, then run confirmed workflows.'],
+  sync: ['Sync', 'Run the fixed daily bundle pipeline.'],
   report: ['Daily Bundle', 'Build and upload market status plus candidate pool bundles.'],
   analysis: ['Stock Analysis', 'Generate a structured research card for one symbol.'],
   worker: ['Worker', 'Poll stock-analysis jobs, publish daily bundles, and refresh holding prices.'],
@@ -39,18 +39,12 @@ window.stockPicker.onCommandLog((payload) => appendLog(payload.text));
 window.stockPicker.onWorkerStatus((payload) => renderWorkerStatus(payload));
 window.stockPicker.onWorkflowEvent((event) => {
   latestWorkflow.textContent = `${event.workflow_id || 'workflow'} / ${event.status || event.event}`;
-  appendLog(`[event] ${event.event}: ${event.message}\n`);
+  appendLog(`${formatWorkflowEvent(event)}\n`);
 });
 
 window.stockPicker.getSettings().then((settings) => {
+  setValue('#storage-config', settings.storagePath);
   setValue('#settings-app-base-url', settings.appBaseUrl);
-  setValue('#settings-worker-token-env', settings.workerTokenEnv);
-  setValue('#settings-tushare-token-env', settings.tushareTokenEnv);
-  setValue('#settings-analysis-claim', settings.analysisClaimPath);
-  setValue('#settings-analysis-result', settings.analysisResultPath);
-  setValue('#settings-daily-publish', settings.dailyBundlePublishPath);
-  setValue('#settings-holding-watchlist', settings.holdingWatchlistPath);
-  setValue('#settings-holding-prices', settings.holdingPricesPath);
   setValue('#settings-analysis-poll', settings.stockAnalysisPollSeconds);
   setValue('#settings-daily-check', settings.dailyBundleCheckSeconds);
   setValue('#settings-daily-time', settings.earliestDailyPublishTime);
@@ -69,12 +63,8 @@ async function runMappedCommand(name) {
     await run(['workflow', 'status', ...args], '#status-output');
     return;
   }
-  if (name === 'sync-dry-run') {
-    await run(clean(['workflow', 'sync-report', '--dry-run', '--json-events', '--start-date', value('#sync-start'), '--end-date', value('#sync-end'), '--factor-run-id', value('#sync-factor-run'), '--top', value('#sync-top'), ...args]));
-    return;
-  }
-  if (name === 'sync-confirm') {
-    await run(clean(['workflow', 'sync-report', '--confirm', '--json-events', '--start-date', value('#sync-start'), '--end-date', value('#sync-end'), '--factor-run-id', value('#sync-factor-run'), '--top', value('#sync-top'), ...args]));
+  if (name === 'sync-daily-bundle') {
+    await run(clean(['app-worker', 'daily-check', '--worker-config', value('#worker-config'), '--auto-pipeline', '--json-events', ...args]), '#sync-output');
     return;
   }
   if (name === 'build-artifact') {
@@ -103,7 +93,7 @@ async function runMappedCommand(name) {
     return;
   }
   if (name === 'holding-refresh') {
-    await run(clean(['app-worker', 'refresh-holding-prices', '--worker-config', value('#worker-config'), '--trade-date', value('#holding-trade-date'), '--token-env', value('#holding-token-env'), '--mock-watchlist', value('#holding-watchlist'), '--mock-upload-path', value('#holding-upload-path'), ...args]));
+    await run(clean(['app-worker', 'refresh-holding-prices', '--worker-config', value('#worker-config'), '--trade-date', value('#holding-trade-date'), '--mock-watchlist', value('#holding-watchlist'), '--mock-upload-path', value('#holding-upload-path'), ...args]));
     return;
   }
   if (name === 'save-settings') {
@@ -154,14 +144,8 @@ function checked(selector, input) {
 
 function readSettings() {
   return {
+    storagePath: value('#storage-config'),
     appBaseUrl: value('#settings-app-base-url'),
-    workerTokenEnv: value('#settings-worker-token-env'),
-    tushareTokenEnv: value('#settings-tushare-token-env'),
-    analysisClaimPath: value('#settings-analysis-claim'),
-    analysisResultPath: value('#settings-analysis-result'),
-    dailyBundlePublishPath: value('#settings-daily-publish'),
-    holdingWatchlistPath: value('#settings-holding-watchlist'),
-    holdingPricesPath: value('#settings-holding-prices'),
     stockAnalysisPollSeconds: Number(value('#settings-analysis-poll') || 15),
     dailyBundleCheckSeconds: Number(value('#settings-daily-check') || 900),
     earliestDailyPublishTime: value('#settings-daily-time') || '16:30',
@@ -188,6 +172,15 @@ function formatNextSchedules(nextSchedules) {
   return entries
     .map(([task, time]) => `${task}: ${new Date(time).toLocaleTimeString()}`)
     .join(' / ');
+}
+
+function formatWorkflowEvent(event) {
+  const task = event.task_type || event.workflow_id || 'workflow';
+  const step = event.step ? ` ${event.step}` : '';
+  const progress = event.step_index && event.step_total ? ` ${event.step_index}/${event.step_total}` : '';
+  const status = event.status || event.event || 'event';
+  const message = event.message || '';
+  return `[${new Date().toLocaleTimeString()}] ${task}${step}${progress} ${status}: ${message}`;
 }
 
 function appendLog(text) {

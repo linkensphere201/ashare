@@ -328,6 +328,41 @@ def test_daily_check_mock_uploads_bundle_and_skips_duplicate_hash(tmp_path: Path
     assert state["daily_bundle_uploads"]["2026-04-28"]["artifact_hash"] == response["bundle_metadata"]["bundle_hash"]
 
 
+def test_daily_check_auto_pipeline_refreshes_before_selecting_factor_run(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run_with_ten_tradable(tmp_path, "factor_002_old")
+    _write_market_status_inputs(tmp_path)
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("default_factor_run_id: factor_002_old\n", encoding="utf-8")
+    upload_path = tmp_path / "daily-upload.json"
+    calls: list[dict[str, object]] = []
+
+    def fake_sync_report_workflow(**kwargs):
+        calls.append(kwargs)
+        _write_factor_run_with_ten_tradable(tmp_path, "factor_002_new")
+        metadata_path = tmp_path / "data" / "reports" / "factor_exploration" / "factor_002_new" / "factor_run_metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["end_date"] = "2026-05-06"
+        metadata["created_at"] = "2026-05-06T16:00:00+00:00"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        class Result:
+            ok = True
+            message = "synced"
+
+        return Result()
+
+    monkeypatch.setattr("stock_picker.app_worker.sync_report_workflow", fake_sync_report_workflow)
+
+    result = run_daily_check(config_path, worker_config, mock_upload=True, mock_upload_path=upload_path, auto_pipeline=True)
+
+    assert result.ok
+    assert calls
+    response = json.loads(upload_path.read_text(encoding="utf-8"))
+    assert response["candidate_pool"]["internal_diagnostics"]["factor_run_id"] == "factor_002_new"
+
+
 def test_daily_check_rejects_upload_when_candidate_pool_is_not_top_10(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok

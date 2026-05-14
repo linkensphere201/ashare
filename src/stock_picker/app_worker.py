@@ -153,14 +153,11 @@ def run_daily_check(
     if not worker_config.daily_bundle_enabled:
         return WorkerResult(True, "daily bundle worker disabled")
     _emit_worker_event(json_events, "daily_bundle", "started", "resolve_factor_run", 1, 4, "daily bundle check started")
-    selected_factor_run = _resolve_factor_run_id(config_path, factor_run_id, worker_config)
-    if not selected_factor_run:
-        if not auto_pipeline:
-            _emit_worker_event(json_events, "daily_bundle", "failed", "resolve_factor_run", 1, 4, "missing local Candidate 002 factor run")
-            return WorkerResult(False, "daily check requires a local Candidate 002 factor run")
+    if auto_pipeline and not factor_run_id:
+        _emit_worker_event(json_events, "daily_bundle", "running", "sync_latest", 1, 4, "syncing latest data and computing Candidate 002")
         pipeline = sync_report_workflow(
             config_path=config_path,
-            workflow_id=f"daily_bundle_auto_{datetime.now(UTC).strftime('%Y%m%d')}",
+            workflow_id=f"daily_bundle_auto_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}",
             dry_run=False,
             confirmed=True,
             start_date=None,
@@ -170,9 +167,10 @@ def run_daily_check(
         )
         if not pipeline.ok:
             return WorkerResult(False, pipeline.message)
-        selected_factor_run = _resolve_factor_run_id(config_path, factor_run_id, worker_config)
-        if not selected_factor_run:
-            return WorkerResult(False, "daily pipeline completed but no Candidate 002 factor run was found")
+    selected_factor_run = _resolve_factor_run_id(config_path, factor_run_id, worker_config, allow_config_default=not auto_pipeline)
+    if not selected_factor_run:
+        _emit_worker_event(json_events, "daily_bundle", "failed", "resolve_factor_run", 1, 4, "missing local Candidate 002 factor run")
+        return WorkerResult(False, "daily check requires a local Candidate 002 factor run")
     _emit_worker_event(json_events, "daily_bundle", "running", "build_bundle", 2, 4, f"building bundle from {selected_factor_run}")
     result = build_daily_bundle(
         config_path,
@@ -372,10 +370,10 @@ def _load_holding_watchlist(config: WorkerConfig, mock_watchlist_path: Path | No
     return _get_json(config, config.holding_watchlist_path, token_kind="worker")
 
 
-def _resolve_factor_run_id(config_path: Path, explicit_factor_run_id: Any, worker_config: WorkerConfig) -> str | None:
+def _resolve_factor_run_id(config_path: Path, explicit_factor_run_id: Any, worker_config: WorkerConfig, allow_config_default: bool = True) -> str | None:
     if explicit_factor_run_id:
         return str(explicit_factor_run_id)
-    if worker_config.default_factor_run_id:
+    if allow_config_default and worker_config.default_factor_run_id:
         return str(worker_config.default_factor_run_id)
     config = load_storage_config(config_path)
     run_root = config.reports_root / "factor_exploration"
@@ -580,4 +578,4 @@ def _emit_worker_event(json_events: bool, task_type: str, status: str, step: str
 
 
 def _print_json_event(event: dict[str, Any]) -> None:
-    print(json.dumps(event, ensure_ascii=False, sort_keys=True))
+    print(json.dumps(event, ensure_ascii=False, sort_keys=True), flush=True)
