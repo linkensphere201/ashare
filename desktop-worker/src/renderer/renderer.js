@@ -1,18 +1,15 @@
 const titles = {
-  home: ['Home', 'Local workflow status and latest outputs.'],
-  sync: ['Sync', 'Run the fixed daily bundle pipeline.'],
-  report: ['Daily Bundle', 'Build and upload market status plus candidate pool bundles.'],
-  analysis: ['Stock Analysis', 'Generate a structured research card for one symbol.'],
-  worker: ['Worker', 'Poll stock-analysis jobs, publish daily bundles, and refresh holding prices.'],
-  logs: ['Logs', 'Workflow and command output.'],
+  home: ['Home', 'Manual task and background worker status.'],
+  manual: ['Manual Task', 'Run fixed local worker tasks without debug parameters.'],
+  worker: ['Worker', 'Start, stop, and inspect the background worker.'],
+  logs: ['Logs', 'Stage-level task output and summaries.'],
   settings: ['Settings', 'Local runtime settings.']
 };
 
 const logOutput = document.querySelector('#log-output');
-const runtimeState = document.querySelector('#runtime-state');
-const latestWorkflow = document.querySelector('#latest-workflow');
-const workerState = document.querySelector('#worker-state');
-let activeOutputSelector = null;
+let currentSettings = null;
+let durationTimer = null;
+let lastManualStatus = null;
 
 document.querySelectorAll('.nav').forEach((button) => {
   button.addEventListener('click', () => {
@@ -29,21 +26,21 @@ document.querySelectorAll('[data-command]').forEach((button) => {
   button.addEventListener('click', () => runMappedCommand(button.dataset.command));
 });
 
-document.querySelector('#stop-command').addEventListener('click', async () => {
-  const stopped = await window.stockPicker.stopCommand();
-  appendLog(stopped ? 'Stopped current task.\n' : 'No active task.\n');
-});
 document.querySelector('#start-worker').addEventListener('click', async () => renderWorkerStatus(await window.stockPicker.startWorker()));
 document.querySelector('#stop-worker').addEventListener('click', async () => renderWorkerStatus(await window.stockPicker.stopWorker()));
 
-window.stockPicker.onCommandLog((payload) => appendOutput(payload.text));
+window.stockPicker.onCommandLog((payload) => {
+  if (!payload.rawOnly) appendLog(payload.text);
+});
 window.stockPicker.onWorkerStatus((payload) => renderWorkerStatus(payload));
+window.stockPicker.onManualTaskStatus((payload) => renderManualTaskStatus(payload));
 window.stockPicker.onWorkflowEvent((event) => {
-  latestWorkflow.textContent = `${event.workflow_id || 'workflow'} / ${event.status || event.event}`;
-  appendOutput(`${formatWorkflowEvent(event)}\n`);
+  if (event.ui_log === false) return;
+  appendLog(`${formatWorkflowEvent(event)}\n`);
 });
 
 window.stockPicker.getSettings().then((settings) => {
+  currentSettings = settings;
   setValue('#storage-config', settings.storagePath);
   setValue('#settings-app-base-url', settings.appBaseUrl);
   setValue('#settings-analysis-poll', settings.stockAnalysisPollSeconds);
@@ -56,72 +53,50 @@ window.stockPicker.getSettings().then((settings) => {
   document.querySelector('#settings-paths').textContent = `Config: ${settings.appWorkerPath} / Env: ${settings.envPath}`;
 });
 window.stockPicker.getWorkerStatus().then(renderWorkerStatus);
+window.stockPicker.getManualTaskStatus().then(renderManualTaskStatus);
 
 async function runMappedCommand(name) {
-  const config = value('#storage-config') || 'config/storage.yaml';
+  if (!currentSettings) currentSettings = await window.stockPicker.getSettings();
+  const config = value('#storage-config') || currentSettings.storagePath;
+  const workerConfig = currentSettings.appWorkerPath;
   const args = ['--config', config];
-  if (name === 'workflow-status') {
-    await run(['workflow', 'status', ...args], '#status-output');
-    return;
-  }
   if (name === 'sync-daily-bundle') {
-    await run(clean(['app-worker', 'daily-check', '--worker-config', value('#worker-config'), '--auto-pipeline', '--json-events', ...args]), '#sync-output');
-    return;
-  }
-  if (name === 'build-artifact') {
-    await run(clean(['publish', 'build-daily-bundle', '--factor-run-id', value('#report-factor-run'), '--trade-date', value('#report-date'), '--output', value('#report-output'), '--top', value('#report-top'), ...args]));
-    return;
-  }
-  if (name === 'mock-upload') {
-    await run(clean(['app-worker', 'daily-check', '--worker-config', value('#worker-config'), '--factor-run-id', value('#report-factor-run'), '--trade-date', value('#report-date'), '--top', value('#report-top'), '--mock-upload', ...args]));
-    await window.stockPicker.notify('Stock Picker', 'Daily bundle mock upload completed');
+    await run(clean(['app-worker', 'daily-check', '--worker-config', workerConfig, '--auto-pipeline', '--json-events', ...args]), 'sync');
     return;
   }
   if (name === 'stock-analysis') {
-    await run(clean(['analysis', 'stock', '--symbol', value('#analysis-symbol'), '--factor-run-id', value('#analysis-factor-run'), '--trade-date', value('#analysis-date'), ...args]));
-    return;
-  }
-  if (name === 'worker-once') {
-    await run(clean(['app-worker', 'run-once', '--worker-config', value('#worker-config'), '--mock-task', value('#mock-task'), ...args]));
-    return;
-  }
-  if (name === 'worker-loop') {
-    await run(clean(['app-worker', 'run', '--max-iterations', '1', '--worker-config', value('#worker-config'), ...args]));
-    return;
-  }
-  if (name === 'daily-check') {
-    await run(clean(['app-worker', 'daily-check', '--worker-config', value('#worker-config'), '--factor-run-id', value('#daily-factor-run'), '--trade-date', value('#daily-trade-date'), '--top', value('#daily-top'), '--mock-upload', ...args]));
+    const symbol = value('#manual-analysis-symbol');
+    if (!symbol) {
+      appendLog(`[${new Date().toLocaleTimeString()}] stock_analysis failed: symbol is required\n`);
+      return;
+    }
+    await run(clean(['app-worker', 'analyze-stock', '--worker-config', workerConfig, '--symbol', symbol, '--json-events', ...args]), 'stock_analysis');
     return;
   }
   if (name === 'holding-refresh') {
-    await run(clean(['app-worker', 'refresh-holding-prices', '--worker-config', value('#worker-config'), '--trade-date', value('#holding-trade-date'), '--mock-watchlist', value('#holding-watchlist'), '--mock-upload-path', value('#holding-upload-path'), ...args]));
+    await run(clean(['app-worker', 'refresh-holding-prices', '--worker-config', workerConfig, '--json-events', ...args]), 'holding_analysis');
     return;
   }
   if (name === 'save-settings') {
     const settings = await window.stockPicker.saveSettings(readSettings());
-    appendLog(`Saved settings: ${settings.appWorkerPath}\n`);
+    currentSettings = settings;
+    appendLog(`[${new Date().toLocaleTimeString()}] settings saved: ${settings.appWorkerPath}\n`);
   }
 }
 
-async function run(args, outputSelector) {
-  runtimeState.textContent = 'Running';
-  activeOutputSelector = outputSelector || null;
-  if (outputSelector) document.querySelector(outputSelector).textContent = '';
-  appendOutput(`$ stock-picker ${args.join(' ')}\n`);
-  const result = await window.stockPicker.runCommand(args);
-  runtimeState.textContent = result.ok ? 'Idle' : 'Failed';
-  appendOutput(`\n[exit ${result.code}]\n`);
-  activeOutputSelector = null;
+async function run(args, manualTaskType) {
+  document.querySelector('#top-runtime-state').textContent = 'Running';
+  appendLog(`$ stock-picker ${args.join(' ')}\n`);
+  const result = await window.stockPicker.runCommand(args, manualTaskType);
+  document.querySelector('#top-runtime-state').textContent = result.ok ? 'Idle' : 'Failed';
+  appendLog(`[${new Date().toLocaleTimeString()}] exit ${result.code}\n`);
 }
 
 function clean(items) {
   const output = [];
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
-    if (item === undefined || item === null || item === '') {
-      index += item === '' && String(items[index - 1] || '').startsWith('--') ? 0 : 0;
-      continue;
-    }
+    if (item === undefined || item === null || item === '') continue;
     if (String(item).startsWith('--') && (items[index + 1] === '' || items[index + 1] === undefined)) {
       index += 1;
       continue;
@@ -159,43 +134,105 @@ function readSettings() {
   };
 }
 
+function renderManualTaskStatus(status) {
+  if (!status) return;
+  lastManualStatus = status;
+  document.querySelector('#manual-task-name').textContent = manualTaskName(status.taskType);
+  document.querySelector('#manual-task-progress').textContent = `${status.stageIndex || 0}/${status.stageTotal || 0}`;
+  document.querySelector('#manual-task-status').textContent = status.status || 'Idle';
+  document.querySelector('#manual-task-message').textContent = `${status.stageName || ''}${status.message ? `: ${status.message}` : ''}${status.error ? `\n${status.error}` : ''}`.trim() || 'No manual task is running.';
+  updateDuration();
+  if (durationTimer) clearInterval(durationTimer);
+  if (status.startedAt && !status.endedAt && status.status !== 'idle') {
+    durationTimer = setInterval(updateDuration, 1000);
+  }
+}
+
+function updateDuration() {
+  const target = document.querySelector('#manual-task-duration');
+  if (!target || !lastManualStatus?.startedAt) {
+    target.textContent = '-';
+    return;
+  }
+  const end = lastManualStatus.endedAt ? new Date(lastManualStatus.endedAt).getTime() : Date.now();
+  const seconds = Math.max(0, Math.floor((end - new Date(lastManualStatus.startedAt).getTime()) / 1000));
+  target.textContent = formatDuration(seconds);
+}
+
 function renderWorkerStatus(status) {
   if (!status) return;
-  workerState.textContent = status.running ? status.status : 'Stopped';
-  document.querySelector('#worker-task').textContent = status.taskType || 'idle';
-  document.querySelector('#worker-step').textContent = status.step || '-';
-  document.querySelector('#worker-progress').textContent = `${status.stepIndex || 0}/${status.stepTotal || 0}`;
-  document.querySelector('#worker-next').textContent = formatNextSchedules(status.nextSchedules);
-  document.querySelector('#worker-message').textContent = `${status.message || ''}\n${status.lastError || ''}`.trim();
+  const runningText = status.running ? 'Yes' : 'No';
+  const statusText = status.running ? status.status : 'Stopped';
+  const taskText = status.taskType || 'idle';
+  const nextText = formatNextSchedules(status.nextSchedules);
+  const message = `${status.message || ''}${status.lastError ? `\n${status.lastError}` : ''}`.trim() || (status.running ? 'Worker running.' : 'Worker stopped.');
+
+  document.querySelector('#worker-enabled').textContent = runningText;
+  document.querySelector('#worker-state').textContent = statusText;
+  document.querySelector('#worker-task').textContent = taskText;
+  document.querySelector('#worker-next').textContent = nextText;
+  document.querySelector('#worker-message').textContent = message;
+
+  document.querySelector('#worker-page-enabled').textContent = runningText;
+  document.querySelector('#worker-page-status').textContent = statusText;
+  document.querySelector('#worker-page-task').textContent = taskText;
+  document.querySelector('#worker-page-step').textContent = status.step || '-';
+  document.querySelector('#worker-page-progress').textContent = `${status.stepIndex || 0}/${status.stepTotal || 0}`;
+  document.querySelector('#worker-page-next').textContent = nextText;
+  document.querySelector('#worker-page-message').textContent = message;
 }
 
 function formatNextSchedules(nextSchedules) {
   const entries = Object.entries(nextSchedules || {});
   if (!entries.length) return '-';
   return entries
-    .map(([task, time]) => `${task}: ${new Date(time).toLocaleTimeString()}`)
+    .map(([task, time]) => `${workerTaskName(task)} ${formatCountdown(time)}`)
     .join(' / ');
 }
 
 function formatWorkflowEvent(event) {
-  const task = event.task_type || event.workflow_id || 'workflow';
-  const step = event.step ? ` ${event.step}` : '';
+  const task = manualTaskName(event.task_type || event.workflow_id || 'workflow');
   const progress = event.step_index && event.step_total ? ` ${event.step_index}/${event.step_total}` : '';
   const status = event.status || event.event || 'event';
   const message = event.message || '';
-  return `[${new Date().toLocaleTimeString()}] ${task}${step}${progress} ${status}: ${message}`;
+  return `[${new Date().toLocaleTimeString()}] ${task}${progress} ${status}: ${message}`;
+}
+
+function formatCountdown(value) {
+  const diff = new Date(value).getTime() - Date.now();
+  if (!Number.isFinite(diff)) return '-';
+  if (diff <= 0) return 'now';
+  return `in ${formatDuration(Math.ceil(diff / 1000))}`;
+}
+
+function formatDuration(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${rest}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function manualTaskName(taskType) {
+  return {
+    sync: 'Sync',
+    daily_bundle: 'Sync',
+    stock_analysis: 'Stock analysis',
+    holding_analysis: 'Holding analysis',
+    holding_prices: 'Holding analysis',
+    manual: 'Manual task'
+  }[taskType] || taskType || 'None';
+}
+
+function workerTaskName(taskType) {
+  return {
+    stock_analysis: 'Stock analysis',
+    daily_bundle: 'Daily bundle',
+    holding_prices: 'Holding prices'
+  }[taskType] || taskType;
 }
 
 function appendLog(text) {
   logOutput.textContent += text;
   logOutput.scrollTop = logOutput.scrollHeight;
-}
-
-function appendOutput(text) {
-  appendLog(text);
-  if (!activeOutputSelector) return;
-  const target = document.querySelector(activeOutputSelector);
-  if (!target) return;
-  target.textContent += text;
-  target.scrollTop = target.scrollHeight;
 }

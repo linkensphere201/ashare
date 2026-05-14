@@ -17,9 +17,7 @@
       </div>
       <nav>
         <button class="nav active" data-view="home">Home</button>
-        <button class="nav" data-view="sync">Sync</button>
-        <button class="nav" data-view="report">Daily Bundle</button>
-        <button class="nav" data-view="analysis">Stock Analysis</button>
+        <button class="nav" data-view="manual">Manual Task</button>
         <button class="nav" data-view="worker">Worker</button>
         <button class="nav" data-view="logs">Logs</button>
         <button class="nav" data-view="settings">Settings</button>
@@ -32,105 +30,80 @@
           <h2 id="view-title">Home</h2>
           <p id="view-subtitle">Local workflow status and latest outputs.</p>
         </div>
-        <button id="stop-command" class="danger">Stop Current Task</button>
-        <button id="start-worker">Start Worker</button>
-        <button id="stop-worker" class="danger">Stop Worker</button>
+        <strong id="top-runtime-state">Idle</strong>
       </header>
 
       <section id="home" class="view active">
-        <div class="metrics">
-          <div class="panel"><span>Runtime</span><strong id="runtime-state">Idle</strong></div>
-          <div class="panel"><span>Latest workflow</span><strong id="latest-workflow">None</strong></div>
-          <div class="panel"><span>Worker</span><strong id="worker-state">Stopped</strong></div>
-        </div>
-        <div class="panel wide">
-          <h3>Current worker task</h3>
-          <div class="metrics">
-            <div class="panel"><span>Task</span><strong id="worker-task">idle</strong></div>
-            <div class="panel"><span>Step</span><strong id="worker-step">-</strong></div>
-            <div class="panel"><span>Progress</span><strong id="worker-progress">0/0</strong></div>
-            <div class="panel"><span>Next schedule</span><strong id="worker-next">-</strong></div>
+        <div class="home-grid">
+          <div class="panel">
+            <h3>Manual task</h3>
+            <div class="status-list">
+              <div><span>Task</span><strong id="manual-task-name">None</strong></div>
+              <div><span>Duration</span><strong id="manual-task-duration">-</strong></div>
+              <div><span>Progress</span><strong id="manual-task-progress">0/0</strong></div>
+              <div><span>Status</span><strong id="manual-task-status">Idle</strong></div>
+            </div>
+            <p id="manual-task-message" class="status-message">No manual task is running.</p>
           </div>
-          <pre id="worker-message"></pre>
-        </div>
-        <div class="panel wide">
-          <h3>Recent workflow status</h3>
-          <button data-command="workflow-status">Refresh</button>
-          <pre id="status-output"></pre>
-        </div>
-      </section>
-
-      <section id="sync" class="view">
-        <div class="panel wide">
-          <h3>Run daily bundle pipeline</h3>
-          <div class="actions">
-            <button data-command="sync-daily-bundle">Run Daily Bundle</button>
-          </div>
-          <p class="hint">Runs the fixed daily flow: reuse uploaded bundle if unchanged, reuse local results when available, otherwise sync data, compute Candidate 002, build, validate, and upload.</p>
-          <pre id="sync-output"></pre>
-        </div>
-      </section>
-
-      <section id="report" class="view">
-        <div class="panel wide">
-          <h3>Build daily bundle</h3>
-          <div class="form-grid">
-            <label>Factor run id <input id="report-factor-run" /></label>
-            <label>Trade date <input id="report-date" placeholder="optional" /></label>
-            <label>Output path <input id="report-output" placeholder="optional" /></label>
-            <label>Top N <input id="report-top" type="number" value="10" /></label>
-          </div>
-          <div class="actions">
-            <button data-command="build-artifact">Build daily bundle</button>
-            <button data-command="mock-upload">Mock result upload</button>
+          <div class="panel">
+            <h3>Background worker</h3>
+            <div class="status-list">
+              <div><span>Enabled</span><strong id="worker-enabled">No</strong></div>
+              <div><span>Status</span><strong id="worker-state">Stopped</strong></div>
+              <div><span>Current task</span><strong id="worker-task">idle</strong></div>
+              <div><span>Next runs</span><strong id="worker-next">-</strong></div>
+            </div>
+            <p id="worker-message" class="status-message">Worker stopped.</p>
           </div>
         </div>
       </section>
 
-      <section id="analysis" class="view">
+      <section id="manual" class="view">
         <div class="panel wide">
-          <h3>Specific-stock analysis</h3>
-          <div class="form-grid">
-            <label>Symbol <input id="analysis-symbol" placeholder="600519.SH" /></label>
-            <label>Factor run id <input id="analysis-factor-run" /></label>
-            <label>Trade date <input id="analysis-date" placeholder="optional" /></label>
+          <h3>Manual Task</h3>
+          <div class="task-row">
+            <div>
+              <strong>Sync</strong>
+              <p class="hint">Run the fixed daily sync, factor, bundle, and upload pipeline.</p>
+            </div>
+            <button data-command="sync-daily-bundle">Start</button>
           </div>
-          <button data-command="stock-analysis">Analyze stock</button>
+          <div class="task-row">
+            <div>
+              <strong>Stock analysis</strong>
+              <p class="hint">Generate a local stock analysis with the latest Candidate 002 factor run.</p>
+            </div>
+            <label class="inline-input">Symbol <input id="manual-analysis-symbol" placeholder="600519.SH" /></label>
+            <button data-command="stock-analysis">Start</button>
+          </div>
+          <div class="task-row">
+            <div>
+              <strong>Holding analysis</strong>
+              <p class="hint">Refresh APP holding prices from the backend watchlist.</p>
+            </div>
+            <button data-command="holding-refresh">Start</button>
+          </div>
         </div>
       </section>
 
       <section id="worker" class="view">
         <div class="panel wide">
-          <h3>Stock analysis worker</h3>
-          <div class="form-grid">
-            <label>Worker config <input id="worker-config" value="config/app-worker.yaml" /></label>
-            <label>Mock task path <input id="mock-task" placeholder="optional mock task json" /></label>
+          <h3>Worker status</h3>
+          <div class="status-list compact">
+            <div><span>Enabled</span><strong id="worker-page-enabled">No</strong></div>
+            <div><span>Status</span><strong id="worker-page-status">Stopped</strong></div>
+            <div><span>Current task</span><strong id="worker-page-task">idle</strong></div>
+            <div><span>Step</span><strong id="worker-page-step">-</strong></div>
+            <div><span>Progress</span><strong id="worker-page-progress">0/0</strong></div>
+            <div><span>Next runs</span><strong id="worker-page-next">-</strong></div>
           </div>
-          <div class="actions">
-            <button data-command="worker-once">Claim once</button>
-            <button data-command="worker-loop">Poll once</button>
-          </div>
+          <p id="worker-page-message" class="status-message">Worker stopped.</p>
         </div>
         <div class="panel wide">
-          <h3>Daily bundle check</h3>
-          <div class="form-grid">
-            <label>Factor run id <input id="daily-factor-run" /></label>
-            <label>Trade date <input id="daily-trade-date" placeholder="optional" /></label>
-            <label>Top N <input id="daily-top" type="number" value="10" /></label>
-          </div>
+          <h3>Worker control</h3>
           <div class="actions">
-            <button data-command="daily-check">Check and mock upload</button>
-          </div>
-        </div>
-        <div class="panel wide">
-          <h3>Holding price refresh</h3>
-          <div class="form-grid">
-            <label>Trade date <input id="holding-trade-date" placeholder="optional" /></label>
-            <label>Mock watchlist <input id="holding-watchlist" placeholder="optional mock watchlist json" /></label>
-            <label>Mock upload path <input id="holding-upload-path" placeholder="optional local output json" /></label>
-          </div>
-          <div class="actions">
-            <button data-command="holding-refresh">Refresh prices</button>
+            <button id="start-worker">Start Worker</button>
+            <button id="stop-worker" class="danger">Stop Worker</button>
           </div>
         </div>
       </section>

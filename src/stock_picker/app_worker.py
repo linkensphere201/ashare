@@ -18,6 +18,8 @@ from stock_picker.config import load_storage_config
 from stock_picker.publish import build_daily_bundle
 from stock_picker.workflow import sync_report_workflow
 
+DEFAULT_NO_PROXY = "127.0.0.1,localhost,101.34.212.101"
+
 
 @dataclass(frozen=True)
 class WorkerResult:
@@ -136,6 +138,41 @@ def run_worker_loop(config_path: Path, worker_config_path: Path, max_iterations:
     return WorkerResult(True, f"worker loop completed iterations: {iterations}")
 
 
+def run_manual_stock_analysis(
+    config_path: Path,
+    worker_config_path: Path,
+    symbol: str,
+    trade_date: str | None = None,
+    output_path: Path | None = None,
+    json_events: bool = False,
+) -> WorkerResult:
+    worker_config = load_worker_config(worker_config_path)
+    selected_symbol = symbol.strip().upper()
+    _emit_worker_event(json_events, "stock_analysis", "running", "validate_symbol", 1, 4, f"validating symbol: {selected_symbol}")
+    if not selected_symbol:
+        _emit_worker_event(json_events, "stock_analysis", "failed", "validate_symbol", 1, 4, "symbol is required", error="symbol is required")
+        return WorkerResult(False, "stock analysis requires a symbol")
+    _emit_worker_event(json_events, "stock_analysis", "running", "resolve_factor_run", 2, 4, "resolving latest Candidate 002 factor run")
+    factor_run_id = _resolve_factor_run_id(config_path, None, worker_config, allow_config_default=False)
+    if not factor_run_id:
+        message = "stock analysis requires a local Candidate 002 factor run"
+        _emit_worker_event(json_events, "stock_analysis", "failed", "resolve_factor_run", 2, 4, message, error=message)
+        return WorkerResult(False, message)
+    _emit_worker_event(json_events, "stock_analysis", "running", "analyze_stock", 3, 4, f"analyzing {selected_symbol} with {factor_run_id}")
+    result = analyze_stock(
+        config_path,
+        symbol=selected_symbol,
+        factor_run_id=factor_run_id,
+        trade_date=trade_date or worker_config.default_trade_date,
+        output_path=output_path,
+    )
+    if not result.ok:
+        _emit_worker_event(json_events, "stock_analysis", "failed", "analyze_stock", 3, 4, result.message, error=result.message)
+        return WorkerResult(False, result.message)
+    _emit_worker_event(json_events, "stock_analysis", "completed", "write_summary", 4, 4, result.message)
+    return WorkerResult(True, result.message)
+
+
 def run_daily_check(
     config_path: Path,
     worker_config_path: Path,
@@ -245,6 +282,15 @@ def run_daily_check(
 
     upload_path = mock_upload_path or config.reports_root / "app_worker" / f"daily_bundle_upload_{selected_date.replace('-', '')}.json"
     _emit_worker_event(json_events, "daily_bundle", "running", "upload_bundle", 4, 4, "uploading daily bundle")
+    _emit_worker_event(
+        json_events,
+        "daily_bundle",
+        "running",
+        "upload_bundle",
+        4,
+        4,
+        f"upload target: {worker_config.app_base_url}{worker_config.daily_bundle_publish_path}; no_proxy={_expected_no_proxy()}; proxy=disabled",
+    )
     if active_workflow_id:
         _set_active_daily_workflow(state, active_workflow_id, "uploading")
     _set_latest_daily_bundle_state(
@@ -257,7 +303,12 @@ def run_daily_check(
     )
     _write_json(state_path, state)
     try:
-        response = _upload_daily_bundle(worker_config, payload, upload_path if mock_upload else None)
+        response = _upload_daily_bundle_with_retry(
+            worker_config,
+            payload,
+            upload_path if mock_upload else None,
+            json_events=json_events,
+        )
     except Exception as error:
         state = _load_json(state_path)
         if active_workflow_id:
@@ -309,21 +360,27 @@ def run_holding_price_refresh(
     mock_watchlist_path: Path | None = None,
     mock_upload_path: Path | None = None,
     limit: int | None = None,
+    json_events: bool = False,
 ) -> WorkerResult:
     worker_config = load_worker_config(worker_config_path)
     if not worker_config.holding_price_enabled:
         return WorkerResult(True, "holding price worker disabled")
     selected_token_env = token_env or worker_config.tushare_token_env
     try:
+        _emit_worker_event(json_events, "holding_analysis", "running", "load_watchlist", 1, 3, "loading holding watchlist")
         watchlist = _load_holding_watchlist(worker_config, mock_watchlist_path)
         symbols = list(watchlist.get("symbols") or [])
         if limit is not None:
             symbols = symbols[:limit]
         if not symbols:
+            _emit_worker_event(json_events, "holding_analysis", "completed", "load_watchlist", 1, 3, "holding price watchlist empty")
             return WorkerResult(True, "holding price watchlist empty")
         token = _env_value(selected_token_env, worker_config.local_env_path)
         if not token:
-            return WorkerResult(False, f"missing required environment variable: {selected_token_env}")
+            message = f"missing required environment variable: {selected_token_env}"
+            _emit_worker_event(json_events, "holding_analysis", "failed", "load_watchlist", 1, 3, message, error=message)
+            return WorkerResult(False, message)
+        _emit_worker_event(json_events, "holding_analysis", "running", "refresh_quotes", 2, 3, f"refreshing prices for {len(symbols)} holdings")
         prices: list[dict[str, Any]] = []
         skipped: list[str] = []
         for item in symbols:
@@ -336,11 +393,17 @@ def run_holding_price_refresh(
                 continue
             prices.append({"symbol": symbol, "name": item.get("name"), **quote})
         if not prices:
-            return WorkerResult(False, "holding price refresh found no quote rows")
+            message = "holding price refresh found no quote rows"
+            _emit_worker_event(json_events, "holding_analysis", "failed", "refresh_quotes", 2, 3, message, error=message)
+            return WorkerResult(False, message)
+        _emit_worker_event(json_events, "holding_analysis", "running", "upload_prices", 3, 3, f"uploading {len(prices)} holding prices")
         response = _upload_holding_prices(worker_config, {"prices": prices}, mock_upload_path)
         suffix = f", skipped={len(skipped)}" if skipped else ""
-        return WorkerResult(True, f"holding prices uploaded: {len(prices)}{suffix}; status={response.get('status', 'ok')}")
+        message = f"holding prices uploaded: {len(prices)}{suffix}; status={response.get('status', 'ok')}"
+        _emit_worker_event(json_events, "holding_analysis", "completed", "upload_prices", 3, 3, message)
+        return WorkerResult(True, message)
     except Exception as error:
+        _emit_worker_event(json_events, "holding_analysis", "failed", "upload_prices", 3, 3, str(error), error=str(error))
         return WorkerResult(False, f"holding price refresh failed: {error}")
 
 
@@ -363,6 +426,7 @@ def run_holding_price_loop(
             mock_watchlist_path=mock_watchlist_path,
             mock_upload_path=mock_upload_path,
             limit=limit,
+            json_events=False,
         )
         if not result.ok:
             return result
@@ -398,6 +462,58 @@ def _upload_daily_bundle(config: WorkerConfig, payload: dict[str, Any], mock_out
     return _post_json(config, config.daily_bundle_publish_path, payload, token_kind="worker")
 
 
+def _upload_daily_bundle_with_retry(
+    config: WorkerConfig,
+    payload: dict[str, Any],
+    mock_output_path: Path | None = None,
+    *,
+    json_events: bool = False,
+    max_retries: int = 3,
+    retry_interval_seconds: float = 5,
+) -> dict[str, Any]:
+    attempt = 0
+    while True:
+        try:
+            _emit_worker_event(
+                json_events,
+                "daily_bundle",
+                "running",
+                "upload_bundle",
+                4,
+                4,
+                f"upload attempt {attempt + 1}/{max_retries + 1}",
+            )
+            return _upload_daily_bundle(config, payload, mock_output_path)
+        except Exception as error:
+            if attempt >= max_retries or not _is_retryable_upload_error(error):
+                raise
+            attempt += 1
+            _emit_worker_event(
+                json_events,
+                "daily_bundle",
+                "retrying",
+                "upload_bundle",
+                4,
+                4,
+                f"upload failed, retrying {attempt}/{max_retries} in {retry_interval_seconds:g}s: {error}",
+                error=str(error),
+            )
+            time.sleep(retry_interval_seconds)
+
+
+def _is_retryable_upload_error(error: Exception) -> bool:
+    if isinstance(error, (urllib.error.URLError, ConnectionError, TimeoutError, OSError)):
+        return True
+    message = str(error)
+    return (
+        "HTTP 5" in message
+        or "WinError 10054" in message
+        or "network error" in message.lower()
+        or "timed out" in message.lower()
+        or "temporarily unavailable" in message.lower()
+    )
+
+
 def _upload_holding_prices(config: WorkerConfig, payload: dict[str, Any], mock_output_path: Path | None = None) -> dict[str, Any]:
     if mock_output_path:
         _write_json(mock_output_path, payload)
@@ -406,6 +522,7 @@ def _upload_holding_prices(config: WorkerConfig, payload: dict[str, Any], mock_o
 
 
 def _post_json(config: WorkerConfig, path: str, payload: dict[str, Any], token_kind: str) -> dict[str, Any]:
+    _ensure_no_proxy()
     token = _token(config, token_kind)
     if not token:
         raise ValueError(f"missing required environment variable: {_token_env_name(config, token_kind)}")
@@ -420,6 +537,7 @@ def _post_json(config: WorkerConfig, path: str, payload: dict[str, Any], token_k
 
 
 def _get_json(config: WorkerConfig, path: str, token_kind: str) -> dict[str, Any]:
+    _ensure_no_proxy()
     token = _token(config, token_kind)
     if not token:
         raise ValueError(f"missing required environment variable: {_token_env_name(config, token_kind)}")
@@ -432,13 +550,40 @@ def _get_json(config: WorkerConfig, path: str, token_kind: str) -> dict[str, Any
 
 
 def _open_json(request: urllib.request.Request) -> dict[str, Any]:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with opener.open(request, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        raise RuntimeError(f"app worker API failed: HTTP {error.code}") from error
+        body = error.read().decode("utf-8", errors="replace")
+        message = f"app worker API failed: HTTP {error.code}"
+        if body:
+            message = f"{message}: {body}"
+        raise RuntimeError(message) from error
     except urllib.error.URLError as error:
         raise RuntimeError(f"app worker API network error: {error.reason}") from error
+
+
+def _ensure_no_proxy() -> None:
+    merged = _expected_no_proxy()
+    os.environ["NO_PROXY"] = merged
+    os.environ["no_proxy"] = merged
+
+
+def _expected_no_proxy() -> str:
+    return _merge_no_proxy(os.environ.get("NO_PROXY"), os.environ.get("no_proxy"), DEFAULT_NO_PROXY)
+
+
+def _merge_no_proxy(*values: str | None) -> str:
+    entries: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        for item in value.split(","):
+            trimmed = item.strip()
+            if trimmed and trimmed not in entries:
+                entries.append(trimmed)
+    return ",".join(entries)
 
 
 def _token(config: WorkerConfig, token_kind: str) -> str | None:

@@ -9,12 +9,37 @@ let activeProcess = null;
 let workerRunning = false;
 let stopAfterCurrent = false;
 let workerState = defaultWorkerState();
+let manualTaskState = defaultManualTaskState();
+let activeTaskContext = null;
 let timers = [];
 const retryState = new Map();
 const notificationState = new Map();
 
+const MANUAL_STAGE_DEFINITIONS = {
+  sync: [
+    ['sync_latest', 'Data sync'],
+    ['quality_check', 'Data quality check'],
+    ['compute_candidate_002_factors', 'Factor 002 compute'],
+    ['rank_candidate_002', 'Candidate pool compute'],
+    ['build_daily_bundle', 'Daily Bundle build'],
+    ['upload_bundle', 'Bundle upload']
+  ],
+  stock_analysis: [
+    ['validate_symbol', 'Validate symbol'],
+    ['resolve_factor_run', 'Resolve latest factor run'],
+    ['analyze_stock', 'Generate stock analysis'],
+    ['write_summary', 'Write result summary']
+  ],
+  holding_analysis: [
+    ['load_watchlist', 'Load holding watchlist'],
+    ['refresh_quotes', 'Refresh holding prices'],
+    ['upload_prices', 'Upload and log result']
+  ]
+};
+
 const repoRoot = path.resolve(__dirname, '..', '..');
 const desktopWorkerRoot = path.resolve(__dirname, '..');
+const DEFAULT_NO_PROXY = '127.0.0.1,localhost,101.34.212.101';
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -229,7 +254,7 @@ function taskKey(task, key) {
   return `${prefix}_${key}`;
 }
 
-function pythonCommand(args, eventChannel, taskType) {
+function pythonCommand(args, eventChannel, taskType, manualTaskType = null) {
   if (activeProcess) {
     return Promise.reject(new Error('another workflow is already running'));
   }
@@ -237,10 +262,25 @@ function pythonCommand(args, eventChannel, taskType) {
     const runtime = runtimeCommand();
     const paths = configPaths();
     const env = loadEnv(paths.env);
-    setWorkerState({ running: workerRunning, taskType, status: 'running', step: 'starting', message: `stock-picker ${args.join(' ')}`, lastError: null });
+    activeTaskContext = { taskType, manualTaskType, lastStageKey: null };
+    if (!manualTaskType) setWorkerState({ running: workerRunning, taskType, status: 'running', step: 'starting', message: `stock-picker ${args.join(' ')}`, lastError: null });
+    if (manualTaskType) {
+      setManualTaskState({
+        taskType: manualTaskType,
+        status: 'running',
+        stageKey: 'starting',
+        stageName: 'Starting',
+        stageIndex: 0,
+        stageTotal: manualStageTotal(manualTaskType),
+        message: `stock-picker ${args.join(' ')}`,
+        error: null,
+        startedAt: new Date().toISOString(),
+        endedAt: null
+      });
+    }
     activeProcess = spawn(runtime.command, [...runtime.args, ...args], {
       cwd: app.isPackaged ? paths.root : repoRoot,
-      env: { ...process.env, ...env, PYTHONUNBUFFERED: '1' },
+      env: runtimeEnv(env),
       windowsHide: true
     });
     let output = '';
@@ -249,8 +289,9 @@ function pythonCommand(args, eventChannel, taskType) {
       const text = chunk.toString();
       output += text;
       appendLog(text);
-      mainWindow?.webContents.send(eventChannel, { stream: 'stdout', text });
-      parseJsonEvents(text);
+      if (!manualTaskType) mainWindow?.webContents.send(eventChannel, { stream: 'stdout', text });
+      else if (!isJsonOnlyChunk(text)) mainWindow?.webContents.send(eventChannel, { stream: 'stdout', text, rawOnly: true });
+      parseJsonEvents(text, activeTaskContext);
     });
     activeProcess.stderr.on('data', (chunk) => {
       const text = chunk.toString();
@@ -261,7 +302,19 @@ function pythonCommand(args, eventChannel, taskType) {
     activeProcess.on('close', (code) => {
       activeProcess = null;
       const ok = code === 0;
-      setWorkerState({ status: ok ? 'succeeded' : 'failed', taskType, step: 'finished', message: ok ? 'Task completed' : 'Task failed', lastError: ok ? null : errorOutput || output });
+      if (!manualTaskType) setWorkerState({ status: ok ? 'succeeded' : 'failed', taskType, step: 'finished', message: ok ? 'Task completed' : 'Task failed', lastError: ok ? null : errorOutput || output });
+      if (manualTaskType) {
+        const terminal = ok ? terminalManualStage(manualTaskType) : manualTaskState;
+        setManualTaskState({
+          ...terminal,
+          taskType: manualTaskType,
+          status: ok ? 'completed' : 'failed',
+          message: ok ? 'Task completed' : 'Task failed',
+          error: ok ? null : (errorOutput || output).slice(-2000),
+          endedAt: new Date().toISOString()
+        });
+      }
+      activeTaskContext = null;
       if (ok && Notification.isSupported()) {
         new Notification({ title: 'Stock Picker', body: 'Workflow completed' }).show();
       }
@@ -270,23 +323,53 @@ function pythonCommand(args, eventChannel, taskType) {
   });
 }
 
-function parseJsonEvents(text) {
+function runtimeEnv(localEnv) {
+  const noProxy = mergeNoProxy(localEnv.NO_PROXY || process.env.NO_PROXY, localEnv.no_proxy || process.env.no_proxy);
+  const merged = {
+    ...process.env,
+    ...localEnv,
+    PYTHONUNBUFFERED: '1',
+    NO_PROXY: noProxy,
+    no_proxy: noProxy
+  };
+  return merged;
+}
+
+function mergeNoProxy(...values) {
+  const entries = [];
+  for (const value of [...values, DEFAULT_NO_PROXY]) {
+    if (!value) continue;
+    for (const item of String(value).split(',')) {
+      const trimmed = item.trim();
+      if (trimmed && !entries.includes(trimmed)) entries.push(trimmed);
+    }
+  }
+  return entries.join(',');
+}
+
+function parseJsonEvents(text, context = null) {
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim().startsWith('{')) continue;
     try {
       const parsed = JSON.parse(line);
-      mainWindow?.webContents.send('workflow-event', parsed);
-      appendLog(formatWorkflowEvent(parsed));
-      notifyWorkflowEvent(parsed);
-      setWorkerState({
-        taskType: parsed.task_type || parsed.workflow_id || workerState.taskType,
-        status: parsed.status || workerState.status,
-        step: parsed.step || workerState.step,
-        stepIndex: parsed.step_index || workerState.stepIndex,
-        stepTotal: parsed.step_total || workerState.stepTotal,
-        message: parsed.message || workerState.message,
-        lastError: parsed.error || workerState.lastError
-      });
+      const uiEvent = normalizeUiEvent(parsed, context);
+      mainWindow?.webContents.send('workflow-event', uiEvent);
+      if (uiEvent.ui_log !== false) {
+        appendLog(formatWorkflowEvent(uiEvent));
+        notifyWorkflowEvent(uiEvent);
+      }
+      if (context?.manualTaskType) updateManualTaskFromEvent(uiEvent, context);
+      if (!context?.manualTaskType) {
+        setWorkerState({
+          taskType: parsed.task_type || parsed.workflow_id || workerState.taskType,
+          status: parsed.status || workerState.status,
+          step: parsed.step || workerState.step,
+          stepIndex: parsed.step_index || workerState.stepIndex,
+          stepTotal: parsed.step_total || workerState.stepTotal,
+          message: parsed.message || workerState.message,
+          lastError: parsed.error || workerState.lastError
+        });
+      }
     } catch (_) {
       // Keep non-event lines in the plain log.
     }
@@ -300,6 +383,105 @@ function formatWorkflowEvent(event) {
   const status = event.status || event.event || 'event';
   const message = event.message || '';
   return `[${new Date().toLocaleTimeString()}] ${task}${step}${progress} ${status}: ${message}\n`;
+}
+
+function normalizeUiEvent(event, context) {
+  if (!context?.manualTaskType) return event;
+  const mapped = mapManualStage(context.manualTaskType, event);
+  if (!mapped) return { ...event, ui_log: false };
+  const status = mapped.status || event.status || event.event || 'running';
+  const stageChanged = context.lastStageKey !== mapped.stageKey;
+  const terminal = /completed|failed|skipped/.test(String(status)) || /completed|failed/.test(String(event.event || ''));
+  context.lastStageKey = mapped.stageKey;
+  return {
+    ...event,
+    task_type: context.manualTaskType,
+    step: mapped.stageKey,
+    step_index: mapped.stageIndex,
+    step_total: mapped.stageTotal,
+    status,
+    message: mapped.message || event.message || mapped.stageName,
+    ui_log: stageChanged || terminal
+  };
+}
+
+function mapManualStage(taskType, event) {
+  const step = String(event.step || '');
+  const status = String(event.status || event.event || '');
+  if (taskType === 'sync') {
+    if (step === 'upload_bundle') return manualStage(taskType, 'upload_bundle', event);
+    if (step === 'build_bundle') return manualStage(taskType, 'build_daily_bundle', event);
+    if (step === 'sync_latest' || step === 'sync_dry_run' || /sync/.test(step)) return manualStage(taskType, 'sync_latest', event);
+    if (step === 'quality_check') return manualStage(taskType, 'quality_check', event);
+    if (step === 'compute_candidate_002_factors') return manualStage(taskType, 'compute_candidate_002_factors', event);
+    if (step === 'rank_candidate_002' || step === 'backtest_candidate_002' || step === 'create_snapshot') return manualStage(taskType, 'rank_candidate_002', event);
+    if (step === 'build_daily_bundle' || /build/.test(step)) return manualStage(taskType, 'build_daily_bundle', event);
+    if (/failed|completed/.test(status)) return terminalManualStage(taskType, event);
+    return null;
+  }
+  if (taskType === 'stock_analysis') {
+    if (step === 'validate_symbol') return manualStage(taskType, 'validate_symbol', event);
+    if (step === 'resolve_factor_run') return manualStage(taskType, 'resolve_factor_run', event);
+    if (step === 'analyze_stock') return manualStage(taskType, 'analyze_stock', event);
+    if (step === 'write_summary' || /completed|failed/.test(status)) return manualStage(taskType, 'write_summary', event);
+    return null;
+  }
+  if (taskType === 'holding_analysis') {
+    if (step === 'load_watchlist') return manualStage(taskType, 'load_watchlist', event);
+    if (step === 'refresh_quotes') return manualStage(taskType, 'refresh_quotes', event);
+    if (step === 'upload_prices' || /completed|failed/.test(status)) return manualStage(taskType, 'upload_prices', event);
+    return null;
+  }
+  return null;
+}
+
+function manualStage(taskType, stageKey, event = {}) {
+  const stages = MANUAL_STAGE_DEFINITIONS[taskType] || [];
+  const index = stages.findIndex(([key]) => key === stageKey);
+  return {
+    stageKey,
+    stageName: index >= 0 ? stages[index][1] : stageKey,
+    stageIndex: index >= 0 ? index + 1 : 0,
+    stageTotal: stages.length,
+    status: event.status || event.event || 'running',
+    message: event.message
+  };
+}
+
+function terminalManualStage(taskType, event = {}) {
+  const stages = MANUAL_STAGE_DEFINITIONS[taskType] || [];
+  const [stageKey, stageName] = stages[stages.length - 1] || ['finished', 'Finished'];
+  return {
+    stageKey,
+    stageName,
+    stageIndex: stages.length,
+    stageTotal: stages.length,
+    status: event.status || event.event || 'completed',
+    message: event.message
+  };
+}
+
+function updateManualTaskFromEvent(event, context) {
+  if (event.ui_log === false) return;
+  setManualTaskState({
+    taskType: context.manualTaskType,
+    status: event.status || event.event || manualTaskState.status,
+    stageKey: event.step || manualTaskState.stageKey,
+    stageName: manualStage(context.manualTaskType, event.step || '').stageName || event.step || manualTaskState.stageName,
+    stageIndex: event.step_index || manualTaskState.stageIndex,
+    stageTotal: event.step_total || manualTaskState.stageTotal,
+    message: event.message || manualTaskState.message,
+    error: event.error || manualTaskState.error
+  });
+}
+
+function manualStageTotal(taskType) {
+  return (MANUAL_STAGE_DEFINITIONS[taskType] || []).length;
+}
+
+function isJsonOnlyChunk(text) {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  return lines.length > 0 && lines.every((line) => line.trim().startsWith('{'));
 }
 
 function notifyWorkflowEvent(event) {
@@ -480,7 +662,16 @@ function stopActiveProcess() {
   if (!activeProcess) return false;
   activeProcess.kill();
   activeProcess = null;
-  setWorkerState({ status: 'interrupted', message: 'Current task interrupted. It can resume from the latest checkpoint.' });
+  if (activeTaskContext?.manualTaskType) {
+    setManualTaskState({
+      status: 'interrupted',
+      message: 'Current task interrupted. It can resume from the latest checkpoint.',
+      endedAt: new Date().toISOString()
+    });
+  } else {
+    setWorkerState({ status: 'interrupted', message: 'Current task interrupted. It can resume from the latest checkpoint.' });
+  }
+  activeTaskContext = null;
   return true;
 }
 
@@ -499,6 +690,22 @@ function defaultWorkerState() {
   };
 }
 
+function defaultManualTaskState() {
+  return {
+    taskType: 'none',
+    status: 'idle',
+    stageKey: '',
+    stageName: '',
+    stageIndex: 0,
+    stageTotal: 0,
+    message: 'No manual task is running.',
+    error: null,
+    startedAt: null,
+    endedAt: null,
+    updatedAt: new Date().toISOString()
+  };
+}
+
 function setWorkerState(patch) {
   workerState = { ...workerState, ...patch, updatedAt: new Date().toISOString() };
   const paths = configPaths();
@@ -507,11 +714,20 @@ function setWorkerState(patch) {
   mainWindow?.webContents.send('worker-status', workerState);
 }
 
-ipcMain.handle('run-command', async (_event, args) => pythonCommand(args, 'command-log', 'manual'));
+function setManualTaskState(patch) {
+  manualTaskState = { ...manualTaskState, ...patch, updatedAt: new Date().toISOString() };
+  const paths = configPaths();
+  fs.mkdirSync(paths.state, { recursive: true });
+  fs.writeFileSync(path.join(paths.state, 'manual-task-state.json'), JSON.stringify(manualTaskState, null, 2), 'utf8');
+  mainWindow?.webContents.send('manual-task-status', manualTaskState);
+}
+
+ipcMain.handle('run-command', async (_event, args, manualTaskType) => pythonCommand(args, 'command-log', 'manual', manualTaskType || 'manual'));
 ipcMain.handle('stop-command', async () => stopActiveProcess());
 ipcMain.handle('start-worker', async () => startWorker());
 ipcMain.handle('stop-worker', async () => stopWorker());
 ipcMain.handle('get-worker-status', async () => workerState);
+ipcMain.handle('get-manual-task-status', async () => manualTaskState);
 ipcMain.handle('get-settings', async () => loadSettings());
 ipcMain.handle('save-settings', async (_event, settings) => saveSettings(settings));
 ipcMain.handle('show-notification', async (_event, title, body) => {

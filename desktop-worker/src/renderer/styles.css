@@ -96,6 +96,11 @@ main {
   background: #ffffff;
 }
 
+#top-runtime-state {
+  font-size: 15px;
+  color: #33423b;
+}
+
 .danger {
   background: #7f1d1d;
   color: #ffffff;
@@ -117,6 +122,13 @@ main {
   margin-bottom: 14px;
 }
 
+.home-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  max-width: 1120px;
+}
+
 .panel {
   background: #ffffff;
   border: 1px solid #dde5e1;
@@ -135,6 +147,51 @@ main {
 
 .wide {
   max-width: 1120px;
+}
+
+.status-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.status-list.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.status-list div {
+  min-width: 0;
+  border-top: 1px solid #e7eeeb;
+  padding-top: 12px;
+}
+
+.status-message {
+  color: #33423b;
+  white-space: pre-wrap;
+  margin-top: 16px;
+  line-height: 1.5;
+}
+
+.task-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, auto) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 16px 0;
+  border-top: 1px solid #e7eeeb;
+}
+
+.task-row:first-of-type {
+  border-top: 0;
+}
+
+.task-row > button {
+  justify-self: end;
+}
+
+.inline-input {
+  min-width: 220px;
 }
 
 .form-grid {
@@ -183,7 +240,11 @@ pre {
     position: static;
   }
 
-  .metrics, .form-grid {
+  .metrics, .form-grid, .home-grid, .status-list, .status-list.compact, .task-row {
     grid-template-columns: 1fr;
+  }
+
+  .task-row > button {
+    justify-self: start;
   }
 }

@@ -12,7 +12,14 @@ import sys
 
 from stock_picker.config import StorageConfig, load_storage_config
 from stock_picker.analysis import analyze_stock
-from stock_picker.app_worker import run_daily_check, run_holding_price_loop, run_holding_price_refresh, run_worker_loop, run_worker_once
+from stock_picker.app_worker import (
+    run_daily_check,
+    run_holding_price_loop,
+    run_holding_price_refresh,
+    run_manual_stock_analysis,
+    run_worker_loop,
+    run_worker_once,
+)
 from stock_picker.curated import import_curated_csv, inspect_curated, promote_raw_batch, promote_raw_run
 from stock_picker.display import inspect_run, list_runs, preview_curated
 from stock_picker.factor_exploration import (
@@ -173,6 +180,14 @@ def build_parser() -> argparse.ArgumentParser:
     app_worker_run_cmd.add_argument("--max-iterations", type=int, help="Optional max poll iterations")
     app_worker_run_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
+    app_worker_analyze_cmd = app_worker_subparsers.add_parser("analyze-stock", help="Run one local stock analysis with the latest Candidate 002 factor run")
+    app_worker_analyze_cmd.add_argument("--worker-config", default="config/app-worker.yaml", help="Path to local worker config")
+    app_worker_analyze_cmd.add_argument("--symbol", required=True, help="Stock symbol, such as 600519.SH")
+    app_worker_analyze_cmd.add_argument("--trade-date", help="Analysis date; defaults to latest factor date")
+    app_worker_analyze_cmd.add_argument("--output", help="Output JSON path")
+    app_worker_analyze_cmd.add_argument("--json-events", action="store_true", help="Print worker progress events as JSON lines")
+    app_worker_analyze_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
+
     app_worker_daily_cmd = app_worker_subparsers.add_parser("daily-check", help="Build and upload the daily bundle when ready")
     app_worker_daily_cmd.add_argument("--worker-config", default="config/app-worker.yaml", help="Path to local worker config")
     app_worker_daily_cmd.add_argument("--factor-run-id", help="Candidate 002 factor run id; defaults to worker config")
@@ -196,6 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
     app_worker_holding_cmd.add_argument("--limit", type=int, help="Maximum symbols to refresh")
     app_worker_holding_cmd.add_argument("--loop", action="store_true", help="Run repeatedly using the configured holding price poll interval")
     app_worker_holding_cmd.add_argument("--max-iterations", type=int, help="Optional max loop iterations")
+    app_worker_holding_cmd.add_argument("--json-events", action="store_true", help="Print worker progress events as JSON lines")
     app_worker_holding_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     factor_research_candidate_cmd = factor_subparsers.add_parser(
@@ -848,6 +864,16 @@ def execute_command(args: argparse.Namespace, context: CliContext):
             max_iterations=args.max_iterations,
         )
 
+    if args.command == "app-worker" and args.app_worker_command == "analyze-stock":
+        return run_manual_stock_analysis(
+            context.config_path,
+            worker_config_path=Path(args.worker_config),
+            symbol=args.symbol,
+            trade_date=args.trade_date,
+            output_path=Path(args.output) if args.output else None,
+            json_events=args.json_events,
+        )
+
     if args.command == "app-worker" and args.app_worker_command == "daily-check":
         return run_daily_check(
             context.config_path,
@@ -882,6 +908,7 @@ def execute_command(args: argparse.Namespace, context: CliContext):
             mock_watchlist_path=Path(args.mock_watchlist) if args.mock_watchlist else None,
             mock_upload_path=Path(args.mock_upload_path) if args.mock_upload_path else None,
             limit=args.limit,
+            json_events=args.json_events,
         )
 
     return CliCommandResult(False, "unsupported command", 2)

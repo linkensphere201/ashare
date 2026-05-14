@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -549,7 +550,21 @@ def _payload_hash(payload: dict[str, Any]) -> str:
     copied = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
     if "bundle_metadata" in copied:
         copied["bundle_metadata"].pop("bundle_hash", None)
+    copied = _normalize_for_javascript_json(copied)
     return hashlib.sha256(json.dumps(copied, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _normalize_for_javascript_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _normalize_for_javascript_json(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_normalize_for_javascript_json(item) for item in value]
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer():
+            return int(value)
+    return value
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

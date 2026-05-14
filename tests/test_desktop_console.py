@@ -10,7 +10,7 @@ import pytest
 
 from stock_picker.cli import main as cli_main
 from stock_picker.analysis import analyze_stock
-from stock_picker.app_worker import run_daily_check, run_holding_price_refresh, run_worker_once
+from stock_picker.app_worker import _merge_no_proxy, run_daily_check, run_holding_price_refresh, run_manual_stock_analysis, run_worker_once
 from stock_picker.curated import promote_raw_batch
 from stock_picker.provider import probe_provider_api, write_raw_batch
 from stock_picker.publish import build_candidate_pool, build_daily_bundle, build_market_status, validate_daily_bundle
@@ -388,6 +388,42 @@ def test_daily_check_records_upload_failure_after_bundle_build(tmp_path: Path, m
     assert "daily_bundle_uploads" not in state
 
 
+def test_daily_check_retries_transient_upload_errors(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run_with_ten_tradable(tmp_path, "factor_002_test")
+    _write_market_status_inputs(tmp_path)
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("", encoding="utf-8")
+    attempts = 0
+    sleeps: list[float] = []
+
+    def flaky_upload(_config, payload, _mock_output_path=None):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("app worker API failed: HTTP 502")
+        return {"status": "accepted", "bundle_id": payload["bundle_metadata"]["bundle_id"], "validation_errors": []}
+
+    monkeypatch.setattr("stock_picker.app_worker._upload_daily_bundle", flaky_upload)
+    monkeypatch.setattr("stock_picker.app_worker.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    result = run_daily_check(config_path, worker_config, trade_date="2026-04-28", top=10)
+
+    assert result.ok
+    assert attempts == 3
+    assert sleeps == [5, 5]
+    state = json.loads((tmp_path / "data" / "reports" / "app_worker" / "daily_upload_state.json").read_text(encoding="utf-8"))
+    assert state["latest_daily_bundle"]["status"] == "uploaded"
+    assert state["latest_daily_bundle"]["upload_response"]["status"] == "accepted"
+
+
+def test_no_proxy_merge_keeps_remote_backend_bypass() -> None:
+    merged = _merge_no_proxy("localhost,127.0.0.1,::1", None, "127.0.0.1,localhost,101.34.212.101")
+
+    assert merged == "localhost,127.0.0.1,::1,101.34.212.101"
+
+
 def test_daily_check_auto_pipeline_refreshes_before_selecting_factor_run(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
@@ -524,6 +560,22 @@ def test_worker_run_once_resolves_latest_factor_run_for_mock_task(tmp_path: Path
     assert response["result_artifact_json"]["stock"]["symbol"] == "600519.SH"
 
 
+def test_manual_stock_analysis_resolves_latest_factor_run_and_emits_events(tmp_path: Path, capsys) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("", encoding="utf-8")
+
+    result = run_manual_stock_analysis(config_path, worker_config, "600519.SH", trade_date="2026-04-28", json_events=True)
+
+    assert result.ok
+    output = capsys.readouterr().out
+    assert '"step": "validate_symbol"' in output
+    assert '"step": "resolve_factor_run"' in output
+    assert '"step": "write_summary"' in output
+
+
 def test_worker_run_once_reports_missing_http_token(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
@@ -553,7 +605,7 @@ def test_daily_check_reports_missing_worker_token(tmp_path: Path, monkeypatch) -
     assert "missing required environment variable: TEST_STOCK_WORKER_TOKEN" in result.message
 
 
-def test_holding_price_refresh_mock_watchlist_and_upload(tmp_path: Path, monkeypatch) -> None:
+def test_holding_price_refresh_mock_watchlist_upload_and_events(tmp_path: Path, monkeypatch, capsys) -> None:
     worker_config = tmp_path / "config" / "app-worker.yaml"
     worker_config.parent.mkdir(parents=True)
     worker_config.write_text("worker_id: local-test-worker\n", encoding="utf-8")
@@ -563,9 +615,13 @@ def test_holding_price_refresh_mock_watchlist_and_upload(tmp_path: Path, monkeyp
     monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
     monkeypatch.setitem(sys.modules, "tushare", _FakeTushare)
 
-    result = run_holding_price_refresh(worker_config, trade_date="2026-04-28", mock_watchlist_path=watchlist, mock_upload_path=upload_path)
+    result = run_holding_price_refresh(worker_config, trade_date="2026-04-28", mock_watchlist_path=watchlist, mock_upload_path=upload_path, json_events=True)
 
     assert result.ok
+    output = capsys.readouterr().out
+    assert '"step": "load_watchlist"' in output
+    assert '"step": "refresh_quotes"' in output
+    assert '"step": "upload_prices"' in output
     payload = json.loads(upload_path.read_text(encoding="utf-8"))
     assert payload["prices"][0]["symbol"] == "600519.SH"
     assert payload["prices"][0]["last_price"] == 1688.0
@@ -669,6 +725,7 @@ def test_new_cli_help_commands_are_available(capsys) -> None:
         ["analysis", "stock", "--help"],
         ["workflow", "sync-report", "--help"],
         ["app-worker", "run-once", "--help"],
+        ["app-worker", "analyze-stock", "--help"],
         ["app-worker", "daily-check", "--help"],
         ["app-worker", "refresh-holding-prices", "--help"],
     ]
@@ -685,6 +742,7 @@ def test_new_cli_help_commands_are_available(capsys) -> None:
     assert "stock-picker analysis stock" in output
     assert "stock-picker workflow sync-report" in output
     assert "stock-picker app-worker run-once" in output
+    assert "analyze-stock" in output
     assert "daily-check" in output
     assert "refresh-holding-prices" in output
 
@@ -718,7 +776,18 @@ def _stock_app_bundle_hash(payload: dict[str, object]) -> str:
 
     copied = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
     copied["bundle_metadata"].pop("bundle_hash", None)
+    copied = _normalize_for_stock_app_json(copied)
     return hashlib.sha256(json.dumps(copied, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _normalize_for_stock_app_json(value):
+    if isinstance(value, dict):
+        return {key: _normalize_for_stock_app_json(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_normalize_for_stock_app_json(item) for item in value]
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
 
 
 def _write_factor_run(tmp_path: Path, factor_run_id: str) -> None:
