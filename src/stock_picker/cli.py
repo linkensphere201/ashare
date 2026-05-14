@@ -183,12 +183,14 @@ def build_parser() -> argparse.ArgumentParser:
     app_worker_daily_cmd.add_argument("--force", action="store_true", help="Upload even if the same trade_date/hash was already uploaded")
     app_worker_daily_cmd.add_argument("--mock-upload", action="store_true", help="Write the raw daily bundle locally instead of calling APP backend")
     app_worker_daily_cmd.add_argument("--mock-upload-path", help="Optional local JSON path for --mock-upload")
+    app_worker_daily_cmd.add_argument("--auto-pipeline", action="store_true", help="Run the daily sync/factor workflow if no local Candidate 002 factor run exists")
+    app_worker_daily_cmd.add_argument("--json-events", action="store_true", help="Print worker progress events as JSON lines")
     app_worker_daily_cmd.add_argument("--config", default="config/storage.yaml", help="Path to storage config")
 
     app_worker_holding_cmd = app_worker_subparsers.add_parser("refresh-holding-prices", help="Refresh APP holding prices from local Tushare quotes")
     app_worker_holding_cmd.add_argument("--worker-config", default="config/app-worker.yaml", help="Path to local worker config")
     app_worker_holding_cmd.add_argument("--trade-date", help="Optional Tushare trade date; defaults to latest available quote")
-    app_worker_holding_cmd.add_argument("--token-env", default="TUSHARE_TOKEN", help="Environment variable containing Tushare token")
+    app_worker_holding_cmd.add_argument("--token-env", help="Environment variable containing Tushare token; defaults to worker config")
     app_worker_holding_cmd.add_argument("--mock-watchlist", help="Optional mock APP watchlist JSON path")
     app_worker_holding_cmd.add_argument("--mock-upload-path", help="Optional local JSON path for uploaded price payload")
     app_worker_holding_cmd.add_argument("--limit", type=int, help="Maximum symbols to refresh")
@@ -858,6 +860,8 @@ def execute_command(args: argparse.Namespace, context: CliContext):
             force=args.force,
             mock_upload=args.mock_upload,
             mock_upload_path=Path(args.mock_upload_path) if args.mock_upload_path else None,
+            json_events=args.json_events,
+            auto_pipeline=args.auto_pipeline,
         )
 
     if args.command == "app-worker" and args.app_worker_command == "refresh-holding-prices":

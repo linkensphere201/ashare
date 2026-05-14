@@ -16,6 +16,7 @@ from typing import Any
 from stock_picker.analysis import analyze_stock
 from stock_picker.config import load_storage_config
 from stock_picker.publish import build_daily_bundle
+from stock_picker.workflow import sync_report_workflow
 
 
 @dataclass(frozen=True)
@@ -30,28 +31,58 @@ class WorkerConfig:
     worker_id: str
     worker_token_env: str
     publisher_token_env: str
+    tushare_token_env: str
     poll_interval_seconds: float
     holding_price_poll_interval_seconds: float
+    daily_bundle_check_interval_seconds: float
+    earliest_daily_publish_time: str
+    analysis_claim_path: str
+    analysis_result_path_template: str
+    daily_bundle_publish_path: str
+    holding_watchlist_path: str
+    holding_prices_path: str
+    stock_analysis_enabled: bool = True
+    daily_bundle_enabled: bool = True
+    holding_price_enabled: bool = True
+    local_env_path: Path | None = None
     default_factor_run_id: str | None = None
     default_trade_date: str | None = None
 
 
 def load_worker_config(path: Path) -> WorkerConfig:
+    defaults = _worker_defaults()
     if not path.exists():
-        return WorkerConfig("http://127.0.0.1:3000", "local-worker", "STOCK_APP_WORKER_TOKEN", "STOCK_APP_PUBLISHER_TOKEN", 15.0, 300.0)
+        return WorkerConfig(**defaults, local_env_path=path.parent / ".env")
     try:
         import yaml  # type: ignore[import-not-found]
 
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except ModuleNotFoundError:
         data = _simple_yaml(path)
+    tasks = data.get("tasks", {}) if isinstance(data.get("tasks"), dict) else {}
+    api_paths = data.get("api_paths", {}) if isinstance(data.get("api_paths"), dict) else {}
+    stock_task = tasks.get("stock_analysis", {}) if isinstance(tasks.get("stock_analysis"), dict) else {}
+    daily_task = tasks.get("daily_bundle", {}) if isinstance(tasks.get("daily_bundle"), dict) else {}
+    holding_task = tasks.get("holding_prices", {}) if isinstance(tasks.get("holding_prices"), dict) else {}
     return WorkerConfig(
-        app_base_url=str(data.get("app_base_url", "http://127.0.0.1:3000")).rstrip("/"),
-        worker_id=str(data.get("worker_id", "local-worker")),
-        worker_token_env=str(data.get("worker_token_env", "STOCK_APP_WORKER_TOKEN")),
-        publisher_token_env=str(data.get("publisher_token_env", "STOCK_APP_PUBLISHER_TOKEN")),
-        poll_interval_seconds=float(data.get("poll_interval_seconds", 15)),
-        holding_price_poll_interval_seconds=float(data.get("holding_price_poll_interval_seconds", 300)),
+        app_base_url=str(data.get("app_base_url", defaults["app_base_url"])).rstrip("/"),
+        worker_id=str(data.get("worker_id", defaults["worker_id"])),
+        worker_token_env=str(data.get("worker_token_env", defaults["worker_token_env"])),
+        publisher_token_env=str(data.get("publisher_token_env", defaults["publisher_token_env"])),
+        tushare_token_env=str(data.get("tushare_token_env", defaults["tushare_token_env"])),
+        poll_interval_seconds=float(stock_task.get("poll_interval_seconds", data.get("poll_interval_seconds", defaults["poll_interval_seconds"]))),
+        holding_price_poll_interval_seconds=float(holding_task.get("poll_interval_seconds", data.get("holding_price_poll_interval_seconds", defaults["holding_price_poll_interval_seconds"]))),
+        daily_bundle_check_interval_seconds=float(daily_task.get("check_interval_seconds", data.get("daily_bundle_check_interval_seconds", defaults["daily_bundle_check_interval_seconds"]))),
+        earliest_daily_publish_time=str(daily_task.get("earliest_publish_time", data.get("earliest_daily_publish_time", defaults["earliest_daily_publish_time"]))),
+        analysis_claim_path=str(api_paths.get("analysis_claim", data.get("analysis_claim_path", defaults["analysis_claim_path"]))),
+        analysis_result_path_template=str(api_paths.get("analysis_result", data.get("analysis_result_path_template", defaults["analysis_result_path_template"]))),
+        daily_bundle_publish_path=str(api_paths.get("daily_bundle_publish", data.get("daily_bundle_publish_path", defaults["daily_bundle_publish_path"]))),
+        holding_watchlist_path=str(api_paths.get("holding_watchlist", data.get("holding_watchlist_path", defaults["holding_watchlist_path"]))),
+        holding_prices_path=str(api_paths.get("holding_prices", data.get("holding_prices_path", defaults["holding_prices_path"]))),
+        stock_analysis_enabled=_bool(stock_task.get("enabled", data.get("stock_analysis_enabled", True))),
+        daily_bundle_enabled=_bool(daily_task.get("enabled", data.get("daily_bundle_enabled", True))),
+        holding_price_enabled=_bool(holding_task.get("enabled", data.get("holding_price_enabled", True))),
+        local_env_path=path.parent / ".env",
         default_factor_run_id=data.get("default_factor_run_id"),
         default_trade_date=data.get("default_trade_date"),
     )
@@ -59,6 +90,8 @@ def load_worker_config(path: Path) -> WorkerConfig:
 
 def run_worker_once(config_path: Path, worker_config_path: Path, mock_task_path: Path | None = None) -> WorkerResult:
     worker_config = load_worker_config(worker_config_path)
+    if not worker_config.stock_analysis_enabled:
+        return WorkerResult(True, "stock analysis worker disabled")
     try:
         task = _load_mock_task(mock_task_path) if mock_task_path else _claim_task(worker_config)
     except Exception as error:
@@ -71,9 +104,9 @@ def run_worker_once(config_path: Path, worker_config_path: Path, mock_task_path:
         if request_type != "stock_analysis":
             raise ValueError(f"unsupported request_type: {request_type}")
         symbol = str(task.get("symbol"))
-        factor_run_id = str(task.get("factor_run_id") or worker_config.default_factor_run_id or "")
+        factor_run_id = _resolve_factor_run_id(config_path, task.get("factor_run_id"), worker_config)
         if not factor_run_id:
-            raise ValueError("stock_analysis task requires factor_run_id or worker default_factor_run_id")
+            raise ValueError("stock_analysis task requires a local Candidate 002 factor run")
         result = analyze_stock(config_path, symbol=symbol, factor_run_id=factor_run_id, trade_date=task.get("report_date") or task.get("reportDate") or worker_config.default_trade_date)
         payload = result.artifact
         if not result.ok:
@@ -114,12 +147,35 @@ def run_daily_check(
     force: bool = False,
     mock_upload: bool = False,
     mock_upload_path: Path | None = None,
+    json_events: bool = False,
+    auto_pipeline: bool = False,
 ) -> WorkerResult:
     config = load_storage_config(config_path)
     worker_config = load_worker_config(worker_config_path)
-    selected_factor_run = factor_run_id or worker_config.default_factor_run_id
+    if not worker_config.daily_bundle_enabled:
+        return WorkerResult(True, "daily bundle worker disabled")
+    _emit_worker_event(json_events, "daily_bundle", "started", "resolve_factor_run", 1, 4, "daily bundle check started")
+    selected_factor_run = _resolve_factor_run_id(config_path, factor_run_id, worker_config)
     if not selected_factor_run:
-        return WorkerResult(False, "daily check requires factor_run_id or worker default_factor_run_id")
+        if not auto_pipeline:
+            _emit_worker_event(json_events, "daily_bundle", "failed", "resolve_factor_run", 1, 4, "missing local Candidate 002 factor run")
+            return WorkerResult(False, "daily check requires a local Candidate 002 factor run")
+        pipeline = sync_report_workflow(
+            config_path=config_path,
+            workflow_id=f"daily_bundle_auto_{datetime.now(UTC).strftime('%Y%m%d')}",
+            dry_run=False,
+            confirmed=True,
+            start_date=None,
+            end_date=trade_date or worker_config.default_trade_date,
+            top=10,
+            emit=lambda event: _print_json_event(event) if json_events else None,
+        )
+        if not pipeline.ok:
+            return WorkerResult(False, pipeline.message)
+        selected_factor_run = _resolve_factor_run_id(config_path, factor_run_id, worker_config)
+        if not selected_factor_run:
+            return WorkerResult(False, "daily pipeline completed but no Candidate 002 factor run was found")
+    _emit_worker_event(json_events, "daily_bundle", "running", "build_bundle", 2, 4, f"building bundle from {selected_factor_run}")
     result = build_daily_bundle(
         config_path,
         factor_run_id=selected_factor_run,
@@ -129,8 +185,10 @@ def run_daily_check(
         top=top,
     )
     if not result.ok or not result.artifact:
+        _emit_worker_event(json_events, "daily_bundle", "failed", "build_bundle", 2, 4, result.message)
         return WorkerResult(False, result.message)
     if len(result.artifact.get("candidate_pool", {}).get("top_stocks", [])) != 10:
+        _emit_worker_event(json_events, "daily_bundle", "failed", "validate_bundle", 3, 4, "candidate_pool top_stocks is not 10")
         return WorkerResult(False, "daily bundle upload requires exactly 10 candidate_pool top_stocks")
 
     payload = result.artifact
@@ -141,12 +199,15 @@ def run_daily_check(
     state = _load_json(state_path)
     previous = state.get("daily_bundle_uploads", {}).get(selected_date, {})
     if not force and previous.get("artifact_hash") == artifact_hash:
+        _emit_worker_event(json_events, "daily_bundle", "skipped", "upload_bundle", 4, 4, f"already uploaded: {selected_date}")
         return WorkerResult(True, f"daily bundle already uploaded: {selected_date} {artifact_hash}")
 
     upload_path = mock_upload_path or config.reports_root / "app_worker" / f"daily_bundle_upload_{selected_date.replace('-', '')}.json"
+    _emit_worker_event(json_events, "daily_bundle", "running", "upload_bundle", 4, 4, "uploading daily bundle")
     try:
         response = _upload_daily_bundle(worker_config, payload, upload_path if mock_upload else None)
     except Exception as error:
+        _emit_worker_event(json_events, "daily_bundle", "failed", "upload_bundle", 4, 4, str(error), error=str(error))
         return WorkerResult(False, f"daily bundle upload failed: {error}")
     state.setdefault("daily_bundle_uploads", {})[selected_date] = {
         "artifact_hash": artifact_hash,
@@ -155,18 +216,22 @@ def run_daily_check(
         "mock_upload_path": str(upload_path) if mock_upload else None,
     }
     _write_json(state_path, state)
+    _emit_worker_event(json_events, "daily_bundle", "completed", "upload_bundle", 4, 4, f"daily bundle uploaded: {selected_date}")
     return WorkerResult(True, f"daily bundle uploaded: {selected_date} {artifact_hash}")
 
 
 def run_holding_price_refresh(
     worker_config_path: Path,
     trade_date: str | None = None,
-    token_env: str = "TUSHARE_TOKEN",
+    token_env: str | None = None,
     mock_watchlist_path: Path | None = None,
     mock_upload_path: Path | None = None,
     limit: int | None = None,
 ) -> WorkerResult:
     worker_config = load_worker_config(worker_config_path)
+    if not worker_config.holding_price_enabled:
+        return WorkerResult(True, "holding price worker disabled")
+    selected_token_env = token_env or worker_config.tushare_token_env
     try:
         watchlist = _load_holding_watchlist(worker_config, mock_watchlist_path)
         symbols = list(watchlist.get("symbols") or [])
@@ -174,9 +239,9 @@ def run_holding_price_refresh(
             symbols = symbols[:limit]
         if not symbols:
             return WorkerResult(True, "holding price watchlist empty")
-        token = os.environ.get(token_env)
+        token = _env_value(selected_token_env, worker_config.local_env_path)
         if not token:
-            return WorkerResult(False, f"missing required environment variable: {token_env}")
+            return WorkerResult(False, f"missing required environment variable: {selected_token_env}")
         prices: list[dict[str, Any]] = []
         skipped: list[str] = []
         for item in symbols:
@@ -200,7 +265,7 @@ def run_holding_price_refresh(
 def run_holding_price_loop(
     worker_config_path: Path,
     trade_date: str | None = None,
-    token_env: str = "TUSHARE_TOKEN",
+    token_env: str | None = None,
     mock_watchlist_path: Path | None = None,
     mock_upload_path: Path | None = None,
     limit: int | None = None,
@@ -229,7 +294,7 @@ def run_holding_price_loop(
 def _claim_task(config: WorkerConfig) -> dict[str, Any] | None:
     response = _post_json(
         config,
-        "/api/worker/analysis-requests/claim",
+        config.analysis_claim_path,
         {"worker_id": config.worker_id, "capabilities": {"request_types": ["stock_analysis"], "artifact_schema_versions": ["stock_app_stock_analysis_v001"]}},
         token_kind="worker",
     )
@@ -240,7 +305,7 @@ def _upload_stock_analysis_result(config: WorkerConfig, request_id: str, payload
     if mock_output_path:
         _write_json(mock_output_path, payload)
         return {"status": "mock_uploaded", "analysis_request_id": request_id}
-    return _post_json(config, f"/api/worker/analysis-requests/{request_id}/result", payload, token_kind="worker")
+    return _post_json(config, config.analysis_result_path_template.replace("{requestId}", request_id), payload, token_kind="worker")
 
 
 def _upload_daily_bundle(config: WorkerConfig, payload: dict[str, Any], mock_output_path: Path | None = None) -> dict[str, Any]:
@@ -248,14 +313,14 @@ def _upload_daily_bundle(config: WorkerConfig, payload: dict[str, Any], mock_out
         _write_json(mock_output_path, payload)
         metadata = payload.get("bundle_metadata", {})
         return {"status": "mock_uploaded", "bundle_id": metadata.get("bundle_id")}
-    return _post_json(config, "/api/publish/daily-bundles", payload, token_kind="publisher")
+    return _post_json(config, config.daily_bundle_publish_path, payload, token_kind="publisher")
 
 
 def _upload_holding_prices(config: WorkerConfig, payload: dict[str, Any], mock_output_path: Path | None = None) -> dict[str, Any]:
     if mock_output_path:
         _write_json(mock_output_path, payload)
         return {"status": "mock_uploaded"}
-    return _post_json(config, "/api/worker/holding-prices", payload, token_kind="worker")
+    return _post_json(config, config.holding_prices_path, payload, token_kind="worker")
 
 
 def _post_json(config: WorkerConfig, path: str, payload: dict[str, Any], token_kind: str) -> dict[str, Any]:
@@ -297,7 +362,7 @@ def _open_json(request: urllib.request.Request) -> dict[str, Any]:
 def _token(config: WorkerConfig, token_kind: str) -> str | None:
     primary = _token_env_name(config, token_kind)
     fallback = "PUBLISHER_TOKEN" if token_kind == "publisher" else "WORKER_TOKEN"
-    return os.environ.get(primary) or os.environ.get(fallback)
+    return _env_value(primary, config.local_env_path) or _env_value(fallback, config.local_env_path)
 
 
 def _token_env_name(config: WorkerConfig, token_kind: str) -> str:
@@ -307,7 +372,35 @@ def _token_env_name(config: WorkerConfig, token_kind: str) -> str:
 def _load_holding_watchlist(config: WorkerConfig, mock_watchlist_path: Path | None) -> dict[str, Any]:
     if mock_watchlist_path:
         return json.loads(mock_watchlist_path.read_text(encoding="utf-8-sig"))
-    return _get_json(config, "/api/worker/holding-prices/watchlist", token_kind="worker")
+    return _get_json(config, config.holding_watchlist_path, token_kind="worker")
+
+
+def _resolve_factor_run_id(config_path: Path, explicit_factor_run_id: Any, worker_config: WorkerConfig) -> str | None:
+    if explicit_factor_run_id:
+        return str(explicit_factor_run_id)
+    if worker_config.default_factor_run_id:
+        return str(worker_config.default_factor_run_id)
+    config = load_storage_config(config_path)
+    run_root = config.reports_root / "factor_exploration"
+    if not run_root.exists():
+        return None
+    candidates: list[tuple[str, str]] = []
+    for metadata_path in run_root.glob("*/factor_run_metadata.json"):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not (metadata_path.parent / "stock_factors_daily.csv").exists():
+            continue
+        factor_version = str(metadata.get("factor_version") or "")
+        if factor_version and "flow_momentum_quality" not in factor_version and "candidate_002" not in factor_version:
+            continue
+        run_id = str(metadata.get("factor_run_id") or metadata_path.parent.name)
+        sort_key = str(metadata.get("end_date") or metadata.get("created_at") or metadata_path.parent.stat().st_mtime)
+        candidates.append((sort_key, run_id))
+    if not candidates:
+        return None
+    return sorted(candidates)[-1][1]
 
 
 def _load_mock_task(path: Path | None) -> dict[str, Any] | None:
@@ -350,7 +443,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
 def _source_snapshot_id(payload: dict[str, Any] | None) -> str | None:
@@ -427,3 +520,68 @@ def _simple_yaml(path: Path) -> dict[str, Any]:
         key, value = line.split(":", 1)
         data[key.strip()] = value.strip().strip("\"'")
     return data
+
+
+def _worker_defaults() -> dict[str, Any]:
+    return {
+        "app_base_url": "http://127.0.0.1:3000",
+        "worker_id": "local-worker",
+        "worker_token_env": "STOCK_APP_WORKER_TOKEN",
+        "publisher_token_env": "STOCK_APP_PUBLISHER_TOKEN",
+        "tushare_token_env": "TUSHARE_TOKEN",
+        "poll_interval_seconds": 15.0,
+        "holding_price_poll_interval_seconds": 300.0,
+        "daily_bundle_check_interval_seconds": 900.0,
+        "earliest_daily_publish_time": "16:30",
+        "analysis_claim_path": "/api/worker/analysis-requests/claim",
+        "analysis_result_path_template": "/api/worker/analysis-requests/{requestId}/result",
+        "daily_bundle_publish_path": "/api/publish/daily-bundles",
+        "holding_watchlist_path": "/api/worker/holding-prices/watchlist",
+        "holding_prices_path": "/api/worker/holding-prices",
+    }
+
+
+def _bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _env_value(name: str, env_path: Path | None) -> str | None:
+    if os.environ.get(name):
+        return os.environ[name]
+    for path in [env_path, Path(".env")]:
+        if not path or not path.exists():
+            continue
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == name:
+                return value.strip().strip("\"'")
+    return None
+
+
+def _emit_worker_event(json_events: bool, task_type: str, status: str, step: str, step_index: int, step_total: int, message: str, error: str | None = None) -> None:
+    if not json_events:
+        return
+    _print_json_event(
+        {
+            "event": "worker_task_event",
+            "task_type": task_type,
+            "status": status,
+            "step": step,
+            "step_index": step_index,
+            "step_total": step_total,
+            "message": message,
+            "error": error,
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+        }
+    )
+
+
+def _print_json_event(event: dict[str, Any]) -> None:
+    print(json.dumps(event, ensure_ascii=False, sort_keys=True))

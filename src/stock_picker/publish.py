@@ -513,13 +513,13 @@ def _required(payload: dict[str, Any], sections: list[str]) -> list[str]:
 def _payload_hash(payload: dict[str, Any]) -> str:
     copied = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
     if "bundle_metadata" in copied:
-        copied["bundle_metadata"]["bundle_hash"] = None
-    return hashlib.sha256(json.dumps(copied, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        copied["bundle_metadata"].pop("bundle_hash", None)
+    return hashlib.sha256(json.dumps(copied, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
 def _period_return(frame: pl.DataFrame, selected_date: str, days: int) -> float | None:

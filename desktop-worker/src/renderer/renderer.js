@@ -11,6 +11,7 @@ const titles = {
 const logOutput = document.querySelector('#log-output');
 const runtimeState = document.querySelector('#runtime-state');
 const latestWorkflow = document.querySelector('#latest-workflow');
+const workerState = document.querySelector('#worker-state');
 
 document.querySelectorAll('.nav').forEach((button) => {
   button.addEventListener('click', () => {
@@ -31,12 +32,36 @@ document.querySelector('#stop-command').addEventListener('click', async () => {
   const stopped = await window.stockPicker.stopCommand();
   appendLog(stopped ? 'Stopped current task.\n' : 'No active task.\n');
 });
+document.querySelector('#start-worker').addEventListener('click', async () => renderWorkerStatus(await window.stockPicker.startWorker()));
+document.querySelector('#stop-worker').addEventListener('click', async () => renderWorkerStatus(await window.stockPicker.stopWorker()));
 
 window.stockPicker.onCommandLog((payload) => appendLog(payload.text));
+window.stockPicker.onWorkerStatus((payload) => renderWorkerStatus(payload));
 window.stockPicker.onWorkflowEvent((event) => {
   latestWorkflow.textContent = `${event.workflow_id || 'workflow'} / ${event.status || event.event}`;
   appendLog(`[event] ${event.event}: ${event.message}\n`);
 });
+
+window.stockPicker.getSettings().then((settings) => {
+  setValue('#settings-app-base-url', settings.appBaseUrl);
+  setValue('#settings-worker-token-env', settings.workerTokenEnv);
+  setValue('#settings-publisher-token-env', settings.publisherTokenEnv);
+  setValue('#settings-tushare-token-env', settings.tushareTokenEnv);
+  setValue('#settings-analysis-claim', settings.analysisClaimPath);
+  setValue('#settings-analysis-result', settings.analysisResultPath);
+  setValue('#settings-daily-publish', settings.dailyBundlePublishPath);
+  setValue('#settings-holding-watchlist', settings.holdingWatchlistPath);
+  setValue('#settings-holding-prices', settings.holdingPricesPath);
+  setValue('#settings-analysis-poll', settings.stockAnalysisPollSeconds);
+  setValue('#settings-daily-check', settings.dailyBundleCheckSeconds);
+  setValue('#settings-daily-time', settings.earliestDailyPublishTime);
+  setValue('#settings-holding-poll', settings.holdingPricePollSeconds);
+  checked('#settings-analysis-enabled', settings.stockAnalysisEnabled);
+  checked('#settings-daily-enabled', settings.dailyBundleEnabled);
+  checked('#settings-holding-enabled', settings.holdingPriceEnabled);
+  document.querySelector('#settings-paths').textContent = `Config: ${settings.appWorkerPath} / Env: ${settings.envPath}`;
+});
+window.stockPicker.getWorkerStatus().then(renderWorkerStatus);
 
 async function runMappedCommand(name) {
   const config = value('#storage-config') || 'config/storage.yaml';
@@ -80,6 +105,11 @@ async function runMappedCommand(name) {
   }
   if (name === 'holding-refresh') {
     await run(clean(['app-worker', 'refresh-holding-prices', '--worker-config', value('#worker-config'), '--trade-date', value('#holding-trade-date'), '--token-env', value('#holding-token-env'), '--mock-watchlist', value('#holding-watchlist'), '--mock-upload-path', value('#holding-upload-path'), ...args]));
+    return;
+  }
+  if (name === 'save-settings') {
+    const settings = await window.stockPicker.saveSettings(readSettings());
+    appendLog(`Saved settings: ${settings.appWorkerPath}\n`);
   }
 }
 
@@ -111,6 +141,55 @@ function clean(items) {
 
 function value(selector) {
   return document.querySelector(selector)?.value?.trim() || '';
+}
+
+function setValue(selector, input) {
+  const node = document.querySelector(selector);
+  if (node) node.value = input ?? '';
+}
+
+function checked(selector, input) {
+  const node = document.querySelector(selector);
+  if (node) node.checked = Boolean(input);
+}
+
+function readSettings() {
+  return {
+    appBaseUrl: value('#settings-app-base-url'),
+    workerTokenEnv: value('#settings-worker-token-env'),
+    publisherTokenEnv: value('#settings-publisher-token-env'),
+    tushareTokenEnv: value('#settings-tushare-token-env'),
+    analysisClaimPath: value('#settings-analysis-claim'),
+    analysisResultPath: value('#settings-analysis-result'),
+    dailyBundlePublishPath: value('#settings-daily-publish'),
+    holdingWatchlistPath: value('#settings-holding-watchlist'),
+    holdingPricesPath: value('#settings-holding-prices'),
+    stockAnalysisPollSeconds: Number(value('#settings-analysis-poll') || 15),
+    dailyBundleCheckSeconds: Number(value('#settings-daily-check') || 900),
+    earliestDailyPublishTime: value('#settings-daily-time') || '16:30',
+    holdingPricePollSeconds: Number(value('#settings-holding-poll') || 300),
+    stockAnalysisEnabled: document.querySelector('#settings-analysis-enabled')?.checked,
+    dailyBundleEnabled: document.querySelector('#settings-daily-enabled')?.checked,
+    holdingPriceEnabled: document.querySelector('#settings-holding-enabled')?.checked
+  };
+}
+
+function renderWorkerStatus(status) {
+  if (!status) return;
+  workerState.textContent = status.running ? status.status : 'Stopped';
+  document.querySelector('#worker-task').textContent = status.taskType || 'idle';
+  document.querySelector('#worker-step').textContent = status.step || '-';
+  document.querySelector('#worker-progress').textContent = `${status.stepIndex || 0}/${status.stepTotal || 0}`;
+  document.querySelector('#worker-next').textContent = formatNextSchedules(status.nextSchedules);
+  document.querySelector('#worker-message').textContent = `${status.message || ''}\n${status.lastError || ''}`.trim();
+}
+
+function formatNextSchedules(nextSchedules) {
+  const entries = Object.entries(nextSchedules || {});
+  if (!entries.length) return '-';
+  return entries
+    .map(([task, time]) => `${task}: ${new Date(time).toLocaleTimeString()}`)
+    .join(' / ');
 }
 
 function appendLog(text) {

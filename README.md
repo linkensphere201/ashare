@@ -505,12 +505,39 @@ Examples:
 stock-picker publish build-daily-bundle --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --top 10
 stock-picker analysis stock --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --symbol 600519.SH
 stock-picker workflow sync-report --config config/storage.yaml --dry-run --json-events
-stock-picker app-worker daily-check --config config/storage.yaml --worker-config config/app-worker.yaml --factor-run-id factor_002_latest_20260506
+stock-picker app-worker daily-check --config config/storage.yaml --worker-config config/app-worker.yaml
 stock-picker app-worker run-once --config config/storage.yaml --worker-config config/app-worker.yaml
 stock-picker app-worker refresh-holding-prices --config config/storage.yaml --worker-config config/app-worker.yaml
 ```
 
-The daily upload path is `daily_publish_bundle_v001`; the old broad publish artifact is not a supported product path. Unit tests use mock worker tasks, mock daily uploads, and mock holding-price watchlists. Real Tushare sync and real stock-app backend upload are not part of unit tests.
+The daily upload path is `daily_publish_bundle_v001`; the old broad publish artifact is not a supported product path. The three `app-worker` commands are debug and smoke-test entry points. The production resident worker is the Windows portable executable under `desktop-worker/`, which schedules daily bundle generation, stock-analysis queue polling, and holding-price refresh in the background.
+
+Normal worker operation should not require a user to pass `factor_run_id`. The runtime resolves the latest local Candidate 002 factor run, while task/config/CLI values remain admin/debug overrides. Unit tests use mock worker tasks, mock daily uploads, and mock holding-price watchlists. Real Tushare sync and real stock-app backend upload are integration rehearsals, not unit-test targets.
+
+#### Portable Worker Configuration
+
+The Windows portable artifact uses exe-adjacent local files:
+
+```text
+StockPickerWorker/
+  Stock Picker Desktop Worker.exe
+  app-worker.yaml
+  storage.yaml
+  .env
+  logs/
+  state/
+  resources/stock-picker-runtime.exe
+```
+
+`app-worker.yaml` contains backend URLs, configurable API paths, task enable flags, and intervals. It stores token environment variable names only; token values are read from process environment variables, exe-adjacent `.env`, or the project `.env` in development mode.
+
+Default schedules:
+
+- stock analysis queue polling: 15 seconds.
+- holding price refresh: 300 seconds.
+- daily bundle check: 900 seconds and not before `16:30` local time.
+
+The portable UI can start/stop scheduling, stop the current subprocess, edit task intervals and API paths, and display current task progress, next run, logs, and recent errors.
 
 #### App and Worker Flow
 

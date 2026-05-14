@@ -8,6 +8,7 @@ pytest-cache-files-*/
 .tmp/
 node_modules/
 desktop-worker/node_modules/
+desktop-worker/resources/*.exe
 
 .env
 .env.*

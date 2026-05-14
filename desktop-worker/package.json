@@ -7,9 +7,44 @@
   "scripts": {
     "dev": "electron .",
     "start": "electron .",
-    "check": "node --check src/main.js && node --check src/preload.js"
+    "check": "node --check src/main.js && node --check src/preload.js",
+    "package:runtime": "..\\.venv\\Scripts\\python.exe -m PyInstaller --clean --onefile --name stock-picker-runtime scripts/runtime-entry.py --distpath resources --workpath build/pyinstaller --specpath build/pyinstaller",
+    "package:win:portable": "electron-builder --win portable"
   },
   "devDependencies": {
+    "electron-builder": "^24.13.3",
     "electron": "^31.0.0"
+  },
+  "build": {
+    "appId": "com.linkensphere.stockpicker.worker",
+    "productName": "Stock Picker Desktop Worker",
+    "asar": true,
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "."
+      },
+      {
+        "from": "../config/app-worker.example.yaml",
+        "to": "config/app-worker.example.yaml"
+      },
+      {
+        "from": "../config/storage.example.yaml",
+        "to": "config/storage.example.yaml",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    }
   }
 }

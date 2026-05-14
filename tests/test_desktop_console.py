@@ -309,7 +309,7 @@ def test_daily_check_mock_uploads_bundle_and_skips_duplicate_hash(tmp_path: Path
     _write_factor_run_with_ten_tradable(tmp_path, "factor_002_test")
     _write_market_status_inputs(tmp_path)
     worker_config = tmp_path / "config" / "app-worker.yaml"
-    worker_config.write_text("worker_id: local-test-worker\ndefault_factor_run_id: factor_002_test\n", encoding="utf-8")
+    worker_config.write_text("worker_id: local-test-worker\n", encoding="utf-8")
     upload_path = tmp_path / "daily-upload.json"
 
     first = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=10)
@@ -322,6 +322,7 @@ def test_daily_check_mock_uploads_bundle_and_skips_duplicate_hash(tmp_path: Path
     assert response["bundle_metadata"]["schema_version"] == "daily_publish_bundle_v001"
     assert response["candidate_pool"]["candidate_pool_metadata"]["schema_version"] == "candidate_pool_v001"
     assert len(response["candidate_pool"]["top_stocks"]) == 10
+    assert response["bundle_metadata"]["bundle_hash"] == _stock_app_bundle_hash(response)
     state = json.loads((tmp_path / "data" / "reports" / "app_worker" / "daily_upload_state.json").read_text(encoding="utf-8"))
     assert state["daily_bundle_uploads"]["2026-04-28"]["artifact_hash"] == response["bundle_metadata"]["bundle_hash"]
 
@@ -349,7 +350,7 @@ def test_daily_check_requires_factor_run_id(tmp_path: Path) -> None:
     result = run_daily_check(config_path, worker_config, mock_upload=True)
 
     assert not result.ok
-    assert "requires factor_run_id" in result.message
+    assert "requires a local Candidate 002 factor run" in result.message
 
 
 def test_worker_run_once_writes_failed_mock_results(tmp_path: Path) -> None:
@@ -368,9 +369,10 @@ def test_worker_run_once_writes_failed_mock_results(tmp_path: Path) -> None:
     assert "unsupported request_type" in response["error_message"]
 
 
-def test_worker_run_once_requires_factor_run_id_for_mock_task(tmp_path: Path) -> None:
+def test_worker_run_once_resolves_latest_factor_run_for_mock_task(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
+    _write_factor_run(tmp_path, "factor_002_test")
     worker_config = tmp_path / "config" / "app-worker.yaml"
     worker_config.write_text("", encoding="utf-8")
     mock_task = tmp_path / "task.json"
@@ -378,9 +380,9 @@ def test_worker_run_once_requires_factor_run_id_for_mock_task(tmp_path: Path) ->
 
     result = run_worker_once(config_path, worker_config, mock_task)
 
-    assert not result.ok
+    assert result.ok
     response = json.loads(mock_task.with_suffix(".result.json").read_text(encoding="utf-8"))
-    assert "requires factor_run_id" in response["error_message"]
+    assert response["result_artifact_json"]["stock"]["symbol"] == "600519.SH"
 
 
 def test_worker_run_once_reports_missing_http_token(tmp_path: Path, monkeypatch) -> None:
@@ -570,6 +572,14 @@ def _write_storage_config(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return config_path
+
+
+def _stock_app_bundle_hash(payload: dict[str, object]) -> str:
+    import hashlib
+
+    copied = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+    copied["bundle_metadata"].pop("bundle_hash", None)
+    return hashlib.sha256(json.dumps(copied, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _write_factor_run(tmp_path: Path, factor_run_id: str) -> None:

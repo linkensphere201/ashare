@@ -2,7 +2,27 @@ app_base_url: http://127.0.0.1:3000
 worker_id: local-worker
 worker_token_env: STOCK_APP_WORKER_TOKEN
 publisher_token_env: STOCK_APP_PUBLISHER_TOKEN
+tushare_token_env: TUSHARE_TOKEN
 poll_interval_seconds: 15
 holding_price_poll_interval_seconds: 300
+daily_bundle_check_interval_seconds: 900
+earliest_daily_publish_time: "16:30"
 default_factor_run_id:
 default_trade_date:
+api_paths:
+  analysis_claim: /api/worker/analysis-requests/claim
+  analysis_result: /api/worker/analysis-requests/{requestId}/result
+  daily_bundle_publish: /api/publish/daily-bundles
+  holding_watchlist: /api/worker/holding-prices/watchlist
+  holding_prices: /api/worker/holding-prices
+tasks:
+  stock_analysis:
+    enabled: true
+    poll_interval_seconds: 15
+  daily_bundle:
+    enabled: true
+    check_interval_seconds: 900
+    earliest_publish_time: "16:30"
+  holding_prices:
+    enabled: true
+    poll_interval_seconds: 300
