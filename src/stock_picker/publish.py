@@ -107,7 +107,11 @@ def build_market_status(
     index_metrics, index_warnings = _load_index_metrics(config.current_curated_root / "daily_prices" / "part-000.parquet", selected_date)
     if index_metrics and not selected_date:
         selected_date = str(index_metrics[0]["trade_date"])
-    sector_metrics, sector_warnings = _load_sector_metrics(config.current_curated_root / "industry_daily" / "part-000.parquet", selected_date)
+    sector_metrics, sector_warnings = _load_sector_metrics(
+        config.current_curated_root / "industry_daily" / "part-000.parquet",
+        config.current_curated_root / "industry_classification" / "part-000.parquet",
+        selected_date,
+    )
     selected_date = selected_date or datetime.now(UTC).date().isoformat()
 
     strongest_index, weakest_index = _strongest_weakest(index_metrics)
@@ -228,13 +232,14 @@ def build_daily_bundle(
     top: int = 10,
 ) -> PublishResult:
     config = load_storage_config(config_path)
-    market = build_market_status(config_path, trade_date=trade_date)
+    selected_date = trade_date or _latest_factor_trade_date(config, factor_run_id)
+    market = build_market_status(config_path, trade_date=selected_date)
     if not market.ok:
         return market
     candidate = build_candidate_pool(
         config_path,
         factor_run_id=factor_run_id,
-        trade_date=trade_date or market.artifact["market_status_metadata"]["trade_date"],
+        trade_date=selected_date or market.artifact["market_status_metadata"]["trade_date"],
         previous_candidate_pool_path=previous_candidate_pool_path,
         previous_bundle_path=previous_bundle_path,
         top=top,
@@ -263,6 +268,23 @@ def build_daily_bundle(
     path = output_path or config.reports_root / "daily_bundles" / f"{payload['bundle_metadata']['bundle_id']}.json"
     _write_json(path, payload)
     return PublishResult(True, f"daily_bundle: {path}", path, payload)
+
+
+def _latest_factor_trade_date(config, factor_run_id: str) -> str | None:
+    factors_path = config.reports_root / "factor_exploration" / factor_run_id / "stock_factors_daily.csv"
+    if not factors_path.exists():
+        return None
+    try:
+        factors = pl.read_csv(factors_path, try_parse_dates=True)
+    except Exception:
+        return None
+    if factors.is_empty() or "trade_date" not in factors.columns:
+        return None
+    if "tradable_flag" in factors.columns:
+        tradable = factors.filter(pl.col("tradable_flag").fill_null(False))
+        if not tradable.is_empty():
+            factors = tradable
+    return str(factors.select(pl.col("trade_date").max()).item())
 
 
 def validate_market_status(payload: dict[str, Any]) -> list[str]:
@@ -338,14 +360,27 @@ def _load_index_metrics(path: Path, trade_date: str | None) -> tuple[list[dict[s
     return rows, [] if rows else ["missing selected broad index rows"]
 
 
-def _load_sector_metrics(path: Path, trade_date: str | None) -> tuple[list[dict[str, Any]], list[str]]:
+def _load_sector_metrics(path: Path, classification_path: Path, trade_date: str | None) -> tuple[list[dict[str, Any]], list[str]]:
     if not path.exists():
         return [], ["missing industry_daily current data"]
+    if not classification_path.exists():
+        return [], ["missing industry_classification current data"]
     frame = pl.read_parquet(path)
+    classification = pl.read_parquet(classification_path)
     if frame.is_empty():
         return [], ["industry_daily has no rows"]
+    if classification.is_empty():
+        return [], ["industry_classification has no rows"]
+    l1 = classification.filter((pl.col("level") == "L1") & (pl.col("source_system") == "SW2021")).select(["index_code", "industry_name"])
+    if l1.is_empty():
+        return [], ["missing SW2021 L1 industry classification rows"]
     selected = trade_date or str(frame.select(pl.col("trade_date").max()).item())
-    rows = frame.filter(pl.col("trade_date").cast(pl.Utf8) == selected).to_dicts()
+    rows = (
+        frame.filter(pl.col("trade_date").cast(pl.Utf8) == selected)
+        .drop("industry_name")
+        .join(l1, on="index_code", how="inner")
+        .to_dicts()
+    )
     return rows, [] if rows else ["missing selected Shenwan L1 sector rows"]
 
 

@@ -33,9 +33,12 @@ DEFAULT_SYNC_DATASETS = [
     "stk_limit",
     "suspend_d",
     "index_daily",
+    "index_classify",
+    "sw_daily",
 ]
 MARKET_SYNC_DATASETS = {"daily_prices", "moneyflow_dc"}
 SUPPLEMENTAL_SYNC_DATASETS = {"adj_factor", "daily_basic", "stk_limit", "suspend_d"}
+INDUSTRY_SYNC_DATASETS = {"index_classify", "sw_daily"}
 SUPPORTED_SYNC_DATASETS = set(DEFAULT_SYNC_DATASETS)
 
 
@@ -229,6 +232,20 @@ def sync_latest(
         if not result.ok:
             return SyncLatestResult(False, "\n".join(lines))
 
+    for dataset in [value for value in selected_datasets if value in INDUSTRY_SYNC_DATASETS and missing_by_dataset[value]]:
+        _progress(progress_callback, f"sync_latest: syncing {dataset} dates={len(missing_by_dataset[dataset])}")
+        result = _sync_range_dataset(
+            config_path=config_path,
+            source=source,
+            token=token,
+            dataset=dataset,
+            missing_dates=missing_by_dataset[dataset],
+            as_of_date=latest_trade_date,
+        )
+        lines.append(result.message)
+        if not result.ok:
+            return SyncLatestResult(False, "\n".join(lines))
+
     if "index_daily" in selected_datasets and missing_by_dataset.get("index_daily"):
         for symbol in selected_benchmark_symbols:
             _progress(progress_callback, f"sync_latest: syncing index_daily {symbol} dates={len(missing_by_dataset['index_daily'])}")
@@ -332,6 +349,9 @@ def _latest_covered_date(current_root: Path, dataset: str) -> str | None:
 
 
 def _missing_dates_for_dataset(current_root: Path, dataset: str, trading_window: list[str], benchmark_symbols: list[str] | None = None) -> list[str]:
+    if dataset == "index_classify":
+        path = current_root / "industry_classification" / "part-000.parquet"
+        return [] if _parquet_has_rows(path) else trading_window[-1:]
     covered = _covered_dates_for_dataset(current_root, dataset, benchmark_symbols or DEFAULT_BENCHMARK_SYMBOLS)
     return [value for value in trading_window if value not in covered]
 
@@ -353,6 +373,8 @@ def _covered_dates_for_dataset(current_root: Path, dataset: str, benchmark_symbo
         return _dates_from_capital_flow(current_root / "capital_flow_or_chip" / "part-000.parquet", "moneyflow_dc")
     if dataset == "cyq_perf":
         return _dates_from_capital_flow(current_root / "capital_flow_or_chip" / "part-000.parquet", "cyq_perf")
+    if dataset == "sw_daily":
+        return _dates_from_parquet(current_root / "industry_daily" / "part-000.parquet")
     return set()
 
 
@@ -461,6 +483,15 @@ def _dates_from_parquet(path: Path) -> set[str]:
         .unique()
     )
     return {value.isoformat() for value in dates.to_series().to_list()}
+
+
+def _parquet_has_rows(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        return not pl.read_parquet(path).is_empty()
+    except Exception:
+        return False
 
 
 def _dates_from_capital_flow(path: Path, source_dataset: str) -> set[str]:

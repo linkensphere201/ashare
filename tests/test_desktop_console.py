@@ -326,6 +326,66 @@ def test_daily_check_mock_uploads_bundle_and_skips_duplicate_hash(tmp_path: Path
     assert response["bundle_metadata"]["bundle_hash"] == _stock_app_bundle_hash(response)
     state = json.loads((tmp_path / "data" / "reports" / "app_worker" / "daily_upload_state.json").read_text(encoding="utf-8"))
     assert state["daily_bundle_uploads"]["2026-04-28"]["artifact_hash"] == response["bundle_metadata"]["bundle_hash"]
+    assert state["daily_bundle_uploads"]["2026-04-28"]["upload_response"] == {"bundle_id": "daily_bundle_20260428_001", "status": "mock_uploaded"}
+    assert state["latest_daily_bundle"]["upload_response"]["status"] == "mock_uploaded"
+    archive_path = Path(state["daily_bundle_uploads"]["2026-04-28"]["archive_path"])
+    assert archive_path.exists()
+    assert json.loads(archive_path.read_text(encoding="utf-8"))["bundle_metadata"]["bundle_hash"] == response["bundle_metadata"]["bundle_hash"]
+
+
+def test_daily_check_rolls_uploaded_bundle_archive(tmp_path: Path) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run_with_ten_tradable(tmp_path, "factor_002_test")
+    _write_market_status_inputs(tmp_path)
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text(
+        "\n".join(
+            [
+                "tasks:",
+                "  daily_bundle:",
+                "    upload_archive_max: 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    upload_path = tmp_path / "daily-upload.json"
+
+    first = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=10)
+    second = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=10, force=True)
+
+    assert first.ok
+    assert second.ok
+    archive_dir = tmp_path / "data" / "reports" / "app_worker" / "uploaded_bundles"
+    archives = list(archive_dir.glob("daily_bundle_*.json"))
+    assert len(archives) == 1
+
+
+def test_daily_check_records_upload_failure_after_bundle_build(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_factor_run_with_ten_tradable(tmp_path, "factor_002_test")
+    _write_market_status_inputs(tmp_path)
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("", encoding="utf-8")
+
+    def fail_upload(*_args, **_kwargs):
+        raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr("stock_picker.app_worker._upload_daily_bundle", fail_upload)
+
+    result = run_daily_check(config_path, worker_config, trade_date="2026-04-28", top=10)
+
+    assert not result.ok
+    assert "backend unavailable" in result.message
+    state = json.loads((tmp_path / "data" / "reports" / "app_worker" / "daily_upload_state.json").read_text(encoding="utf-8"))
+    latest = state["latest_daily_bundle"]
+    assert latest["status"] == "upload_failed"
+    assert latest["trade_date"] == "2026-04-28"
+    assert latest["artifact_hash"]
+    assert Path(latest["bundle_path"]).exists()
+    assert latest["error"] == "backend unavailable"
+    assert "daily_bundle_uploads" not in state
 
 
 def test_daily_check_auto_pipeline_refreshes_before_selecting_factor_run(tmp_path: Path, monkeypatch) -> None:
@@ -796,12 +856,25 @@ def _write_factor_run_with_ten_tradable(tmp_path: Path, factor_run_id: str) -> N
 
 def _write_market_status_inputs(tmp_path: Path) -> None:
     _write_index_daily_current(tmp_path)
+    classification_path = tmp_path / "data" / "curated" / "current" / "industry_classification" / "part-000.parquet"
+    classification_path.parent.mkdir(parents=True, exist_ok=True)
+    industry_codes = ["801770.SI", "801890.SI", "801080.SI", "801180.SI", "801150.SI", "801120.SI"]
+    industry_names = ["通信", "机械设备", "电子", "房地产", "医药生物", "食品饮料"]
+    pl.DataFrame(
+        {
+            "index_code": industry_codes,
+            "industry_name": industry_names,
+            "level": ["L1"] * len(industry_codes),
+            "source_system": ["SW2021"] * len(industry_codes),
+            "parent_code": [None] * len(industry_codes),
+        }
+    ).write_parquet(classification_path)
     industry_path = tmp_path / "data" / "curated" / "current" / "industry_daily" / "part-000.parquet"
     industry_path.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(
         {
-            "index_code": ["801770.SI", "801890.SI", "801080.SI", "801180.SI", "801150.SI", "801120.SI"],
-            "industry_name": ["通信", "机械设备", "电子", "房地产", "医药生物", "食品饮料"],
+            "index_code": industry_codes,
+            "industry_name": industry_names,
             "trade_date": [date(2026, 4, 28)] * 6,
             "close": [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
             "pct_change": [2.6, 2.1, 1.8, -2.4, -1.9, -1.4],

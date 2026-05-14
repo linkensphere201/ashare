@@ -34,6 +34,7 @@ class WorkerConfig:
     poll_interval_seconds: float
     holding_price_poll_interval_seconds: float
     daily_bundle_check_interval_seconds: float
+    daily_bundle_upload_archive_max: int
     earliest_daily_publish_time: str
     analysis_claim_path: str
     analysis_result_path_template: str
@@ -71,6 +72,7 @@ def load_worker_config(path: Path) -> WorkerConfig:
         poll_interval_seconds=float(stock_task.get("poll_interval_seconds", data.get("poll_interval_seconds", defaults["poll_interval_seconds"]))),
         holding_price_poll_interval_seconds=float(holding_task.get("poll_interval_seconds", data.get("holding_price_poll_interval_seconds", defaults["holding_price_poll_interval_seconds"]))),
         daily_bundle_check_interval_seconds=float(daily_task.get("check_interval_seconds", data.get("daily_bundle_check_interval_seconds", defaults["daily_bundle_check_interval_seconds"]))),
+        daily_bundle_upload_archive_max=max(0, int(daily_task.get("upload_archive_max", data.get("daily_bundle_upload_archive_max", defaults["daily_bundle_upload_archive_max"])))),
         earliest_daily_publish_time=str(daily_task.get("earliest_publish_time", data.get("earliest_daily_publish_time", defaults["earliest_daily_publish_time"]))),
         analysis_claim_path=str(api_paths.get("analysis_claim", data.get("analysis_claim_path", defaults["analysis_claim_path"]))),
         analysis_result_path_template=str(api_paths.get("analysis_result", data.get("analysis_result_path_template", defaults["analysis_result_path_template"]))),
@@ -186,7 +188,7 @@ def run_daily_check(
             _write_json(state_path, state)
             return WorkerResult(False, pipeline.message)
         state = _load_json(state_path)
-        _set_active_daily_workflow(state, workflow_id, "completed")
+        _set_active_daily_workflow(state, workflow_id, "pipeline_completed")
         _write_json(state_path, state)
     selected_factor_run = _resolve_factor_run_id(config_path, factor_run_id, worker_config, allow_config_default=not auto_pipeline)
     if not selected_factor_run:
@@ -212,8 +214,30 @@ def run_daily_check(
     metadata = payload.get("bundle_metadata", {})
     selected_date = str(metadata.get("trade_date"))
     artifact_hash = str(metadata.get("bundle_hash") or _artifact_hash(payload))
+    bundle_path = str(result.artifact_path) if result.artifact_path else None
+    active_workflow_id = _active_daily_workflow_id(state)
+    _set_latest_daily_bundle_state(
+        state,
+        status="bundle_built",
+        trade_date=selected_date,
+        artifact_hash=artifact_hash,
+        bundle_path=bundle_path,
+        workflow_id=active_workflow_id,
+    )
+    _write_json(state_path, state)
     previous = state.get("daily_bundle_uploads", {}).get(selected_date, {})
     if not force and previous.get("artifact_hash") == artifact_hash:
+        _set_latest_daily_bundle_state(
+            state,
+            status="skipped_already_uploaded",
+            trade_date=selected_date,
+            artifact_hash=artifact_hash,
+            bundle_path=bundle_path,
+            workflow_id=active_workflow_id,
+            archive_path=previous.get("archive_path"),
+            remote_result_id=previous.get("remote_result_id"),
+            upload_response=previous.get("upload_response") if isinstance(previous.get("upload_response"), dict) else None,
+        )
         _clear_active_daily_workflow(state)
         _write_json(state_path, state)
         _emit_worker_event(json_events, "daily_bundle", "skipped", "upload_bundle", 4, 4, f"already uploaded: {selected_date}")
@@ -221,21 +245,61 @@ def run_daily_check(
 
     upload_path = mock_upload_path or config.reports_root / "app_worker" / f"daily_bundle_upload_{selected_date.replace('-', '')}.json"
     _emit_worker_event(json_events, "daily_bundle", "running", "upload_bundle", 4, 4, "uploading daily bundle")
+    if active_workflow_id:
+        _set_active_daily_workflow(state, active_workflow_id, "uploading")
+    _set_latest_daily_bundle_state(
+        state,
+        status="uploading",
+        trade_date=selected_date,
+        artifact_hash=artifact_hash,
+        bundle_path=bundle_path,
+        workflow_id=active_workflow_id,
+    )
+    _write_json(state_path, state)
     try:
         response = _upload_daily_bundle(worker_config, payload, upload_path if mock_upload else None)
     except Exception as error:
+        state = _load_json(state_path)
+        if active_workflow_id:
+            _set_active_daily_workflow(state, active_workflow_id, "upload_failed", str(error))
+        _set_latest_daily_bundle_state(
+            state,
+            status="upload_failed",
+            trade_date=selected_date,
+            artifact_hash=artifact_hash,
+            bundle_path=bundle_path,
+            workflow_id=active_workflow_id,
+            error=str(error),
+        )
+        _write_json(state_path, state)
         _emit_worker_event(json_events, "daily_bundle", "failed", "upload_bundle", 4, 4, str(error), error=str(error))
         return WorkerResult(False, f"daily bundle upload failed: {error}")
+    state = _load_json(state_path)
+    archived_path = _archive_uploaded_daily_bundle(config, payload, artifact_hash, worker_config.daily_bundle_upload_archive_max)
     state.setdefault("daily_bundle_uploads", {})[selected_date] = {
         "artifact_hash": artifact_hash,
         "uploaded_at": _generated_at(result.artifact),
         "remote_result_id": response.get("daily_bundle_id") or response.get("bundle_id"),
         "mock_upload_path": str(upload_path) if mock_upload else None,
+        "archive_path": str(archived_path) if archived_path else None,
+        "upload_response": _upload_response_summary(response),
     }
+    _set_latest_daily_bundle_state(
+        state,
+        status="uploaded",
+        trade_date=selected_date,
+        artifact_hash=artifact_hash,
+        bundle_path=bundle_path,
+        workflow_id=active_workflow_id,
+        archive_path=str(archived_path) if archived_path else None,
+        remote_result_id=response.get("daily_bundle_id") or response.get("bundle_id"),
+        upload_response=_upload_response_summary(response),
+    )
     _clear_active_daily_workflow(state)
     _write_json(state_path, state)
-    _emit_worker_event(json_events, "daily_bundle", "completed", "upload_bundle", 4, 4, f"daily bundle uploaded: {selected_date}")
-    return WorkerResult(True, f"daily bundle uploaded: {selected_date} {artifact_hash}")
+    response_text = json.dumps(_upload_response_summary(response), ensure_ascii=False, sort_keys=True)
+    _emit_worker_event(json_events, "daily_bundle", "completed", "upload_bundle", 4, 4, f"daily bundle uploaded: {selected_date}; upload_response={response_text}")
+    return WorkerResult(True, f"daily bundle uploaded: {selected_date} {artifact_hash}; upload_response={response_text}")
 
 
 def run_holding_price_refresh(
@@ -452,6 +516,30 @@ def _daily_upload_state_path(config) -> Path:
     return config.reports_root / "app_worker" / "daily_upload_state.json"
 
 
+def _archive_uploaded_daily_bundle(config, payload: dict[str, Any], artifact_hash: str, max_count: int) -> Path | None:
+    if max_count <= 0:
+        return None
+    metadata = payload.get("bundle_metadata", {})
+    trade_date = str(metadata.get("trade_date") or "unknown").replace("-", "")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    archive_dir = config.reports_root / "app_worker" / "uploaded_bundles"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    path = archive_dir / f"daily_bundle_{trade_date}_{timestamp}_{artifact_hash[:12]}.json"
+    counter = 2
+    while path.exists():
+        path = archive_dir / f"daily_bundle_{trade_date}_{timestamp}_{artifact_hash[:12]}_{counter}.json"
+        counter += 1
+    _write_json(path, payload)
+    _prune_daily_bundle_archives(archive_dir, max_count)
+    return path
+
+
+def _prune_daily_bundle_archives(archive_dir: Path, max_count: int) -> None:
+    archives = sorted(archive_dir.glob("daily_bundle_*.json"), key=lambda item: (item.stat().st_mtime, item.name), reverse=True)
+    for path in archives[max_count:]:
+        path.unlink()
+
+
 def _active_daily_workflow_id(state: dict[str, Any]) -> str | None:
     active = state.get("active_daily_workflow")
     if not isinstance(active, dict):
@@ -475,6 +563,50 @@ def _set_active_daily_workflow(state: dict[str, Any], workflow_id: str, status: 
 
 def _clear_active_daily_workflow(state: dict[str, Any]) -> None:
     state.pop("active_daily_workflow", None)
+
+
+def _set_latest_daily_bundle_state(
+    state: dict[str, Any],
+    *,
+    status: str,
+    trade_date: str,
+    artifact_hash: str,
+    bundle_path: str | None,
+    workflow_id: str | None,
+    error: str | None = None,
+    archive_path: str | None = None,
+    remote_result_id: str | None = None,
+    upload_response: dict[str, Any] | None = None,
+) -> None:
+    latest = {
+        "status": status,
+        "trade_date": trade_date,
+        "artifact_hash": artifact_hash,
+        "bundle_path": bundle_path,
+        "workflow_id": workflow_id,
+        "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    if error:
+        latest["error"] = error
+    if archive_path:
+        latest["archive_path"] = archive_path
+    if remote_result_id:
+        latest["remote_result_id"] = remote_result_id
+    if upload_response:
+        latest["upload_response"] = upload_response
+    state["latest_daily_bundle"] = latest
+
+
+def _upload_response_summary(response: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "bundle_id",
+        "daily_bundle_id",
+        "status",
+        "validation_errors",
+        "message",
+        "error",
+    ]
+    return {key: response.get(key) for key in keys if key in response}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -573,6 +705,7 @@ def _worker_defaults() -> dict[str, Any]:
         "poll_interval_seconds": 15.0,
         "holding_price_poll_interval_seconds": 300.0,
         "daily_bundle_check_interval_seconds": 900.0,
+        "daily_bundle_upload_archive_max": 20,
         "earliest_daily_publish_time": "16:30",
         "analysis_claim_path": "/api/worker/analysis-requests/claim",
         "analysis_result_path_template": "/api/worker/analysis-requests/{requestId}/result",

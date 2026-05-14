@@ -14,6 +14,7 @@ const retryState = new Map();
 const notificationState = new Map();
 
 const repoRoot = path.resolve(__dirname, '..', '..');
+const desktopWorkerRoot = path.resolve(__dirname, '..');
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -26,7 +27,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false
-    }
+    },
+    icon: appIconPath('180.png')
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -39,7 +41,7 @@ function createWindow() {
 }
 
 function createTray() {
-  const trayIconPath = path.join(__dirname, 'renderer', 'tray.ico');
+  const trayIconPath = appIconPath('32.png');
   const image = fs.existsSync(trayIconPath)
     ? trayIconPath
     : nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGklEQVR4nGNkYGD4z0AEYBxVSF+FAgMDAH5pAhEMZnoXAAAAAElFTkSuQmCC');
@@ -70,6 +72,12 @@ function portableRoot() {
 function resourceRoot() {
   if (app.isPackaged) return process.resourcesPath;
   return repoRoot;
+}
+
+function appIconPath(filename) {
+  const packagedIcon = path.join(resourceRoot(), 'rabbit-v2-modern', filename);
+  if (fs.existsSync(packagedIcon)) return packagedIcon;
+  return path.join(desktopWorkerRoot, 'resources', 'rabbit-v2-modern', filename);
 }
 
 function configPaths() {
@@ -155,6 +163,7 @@ function saveSettings(settings) {
     `    enabled: ${settings.dailyBundleEnabled !== false}`,
     `    check_interval_seconds: ${Number(settings.dailyBundleCheckSeconds || 900)}`,
     `    earliest_publish_time: "${settings.earliestDailyPublishTime || '16:30'}"`,
+    '    upload_archive_max: 20',
     '  holding_prices:',
     `    enabled: ${settings.holdingPriceEnabled !== false}`,
     `    poll_interval_seconds: ${Number(settings.holdingPricePollSeconds || 300)}`,

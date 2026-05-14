@@ -22,6 +22,7 @@ tasks:
     enabled: true
     check_interval_seconds: 900
     earliest_publish_time: "16:30"
+    upload_archive_max: 20
   holding_prices:
     enabled: true
     poll_interval_seconds: 300

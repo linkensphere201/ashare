@@ -207,7 +207,10 @@ def backtest_candidate_002(
 
     factors, run_dir = _load_factor_run(config_path, factor_run_id)
     metadata = json.loads((run_dir / "factor_run_metadata.json").read_text(encoding="utf-8"))
-    daily = _with_date_column(pl.read_parquet(Path(metadata["dataset_paths"]["daily_prices"])), "trade_date")
+    daily = _ensure_numeric_columns(
+        _with_date_column(pl.read_parquet(Path(metadata["dataset_paths"]["daily_prices"])), "trade_date"),
+        ["open", "high", "low", "close", "pre_close", "volume", "amount", "pct_change", "turnover_rate", "adj_factor", "limit_up", "limit_down"],
+    )
     holding_days = 1 if rebalance == "daily" else 5
     signal_dates = _rebalance_dates(factors, rebalance)
     ranked = (
@@ -287,8 +290,14 @@ def _compute_factor_frame(
     start_date: str,
     end_date: str,
 ) -> pl.DataFrame:
-    daily = _with_date_column(daily, "trade_date")
-    capital = _with_date_column(capital, "trade_date")
+    daily = _ensure_numeric_columns(
+        _with_date_column(daily, "trade_date"),
+        ["open", "high", "low", "close", "pre_close", "volume", "amount", "pct_change", "turnover_rate", "adj_factor", "limit_up", "limit_down"],
+    )
+    capital = _ensure_numeric_columns(
+        _with_date_column(capital, "trade_date"),
+        ["main_force_holding_ratio", "close_profit_ratio", "main_net_inflow", "main_net_inflow_rate", "retail_net_inflow", "chip_concentration"],
+    )
     if "list_date" in security.columns:
         security = _with_date_column(security, "list_date")
     daily_stock = _with_adjusted_prices(daily).filter(pl.col("asset_type").fill_null("stock") != "index")
@@ -344,6 +353,11 @@ def _with_date_column(frame: pl.DataFrame, column: str) -> pl.DataFrame:
     if column not in frame.columns:
         return frame
     return frame.with_columns(pl.col(column).cast(pl.Utf8).str.strptime(pl.Date, "%Y-%m-%d", strict=False).alias(column))
+
+
+def _ensure_numeric_columns(frame: pl.DataFrame, columns: list[str]) -> pl.DataFrame:
+    expressions = [pl.col(column).cast(pl.Float64, strict=False).alias(column) for column in columns if column in frame.columns]
+    return frame.with_columns(expressions) if expressions else frame
 
 
 def _score_factor_frame(frame: pl.DataFrame) -> pl.DataFrame:
