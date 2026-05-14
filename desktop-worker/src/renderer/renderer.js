@@ -45,7 +45,6 @@ window.stockPicker.onWorkflowEvent((event) => {
 window.stockPicker.getSettings().then((settings) => {
   setValue('#settings-app-base-url', settings.appBaseUrl);
   setValue('#settings-worker-token-env', settings.workerTokenEnv);
-  setValue('#settings-publisher-token-env', settings.publisherTokenEnv);
   setValue('#settings-tushare-token-env', settings.tushareTokenEnv);
   setValue('#settings-analysis-claim', settings.analysisClaimPath);
   setValue('#settings-analysis-result', settings.analysisResultPath);
@@ -157,7 +156,6 @@ function readSettings() {
   return {
     appBaseUrl: value('#settings-app-base-url'),
     workerTokenEnv: value('#settings-worker-token-env'),
-    publisherTokenEnv: value('#settings-publisher-token-env'),
     tushareTokenEnv: value('#settings-tushare-token-env'),
     analysisClaimPath: value('#settings-analysis-claim'),
     analysisResultPath: value('#settings-analysis-result'),

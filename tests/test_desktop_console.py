@@ -398,20 +398,21 @@ def test_worker_run_once_reports_missing_http_token(tmp_path: Path, monkeypatch)
     assert "missing required environment variable: TEST_STOCK_WORKER_TOKEN" in result.message
 
 
-def test_daily_check_reports_missing_publisher_token(tmp_path: Path, monkeypatch) -> None:
+def test_daily_check_reports_missing_worker_token(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
     _write_factor_run_with_ten_tradable(tmp_path, "factor_002_test")
     _write_market_status_inputs(tmp_path)
     worker_config = tmp_path / "config" / "app-worker.yaml"
-    worker_config.write_text("publisher_token_env: TEST_STOCK_PUBLISHER_TOKEN\ndefault_factor_run_id: factor_002_test\n", encoding="utf-8")
-    monkeypatch.delenv("TEST_STOCK_PUBLISHER_TOKEN", raising=False)
+    worker_config.write_text("worker_token_env: TEST_STOCK_WORKER_TOKEN\ndefault_factor_run_id: factor_002_test\n", encoding="utf-8")
+    monkeypatch.delenv("TEST_STOCK_WORKER_TOKEN", raising=False)
+    monkeypatch.delenv("WORKER_TOKEN", raising=False)
     monkeypatch.delenv("PUBLISHER_TOKEN", raising=False)
 
     result = run_daily_check(config_path, worker_config, trade_date="2026-04-28")
 
     assert not result.ok
-    assert "missing required environment variable: TEST_STOCK_PUBLISHER_TOKEN" in result.message
+    assert "missing required environment variable: TEST_STOCK_WORKER_TOKEN" in result.message
 
 
 def test_holding_price_refresh_mock_watchlist_and_upload(tmp_path: Path, monkeypatch) -> None:

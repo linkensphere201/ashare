@@ -1,7 +1,6 @@
 app_base_url: http://127.0.0.1:3000
 worker_id: local-worker
 worker_token_env: STOCK_APP_WORKER_TOKEN
-publisher_token_env: STOCK_APP_PUBLISHER_TOKEN
 tushare_token_env: TUSHARE_TOKEN
 poll_interval_seconds: 15
 holding_price_poll_interval_seconds: 300

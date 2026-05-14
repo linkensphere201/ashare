@@ -89,7 +89,7 @@ function ensurePortableFiles() {
   fs.mkdirSync(paths.state, { recursive: true });
   copyTemplate(paths.appWorker, path.join(resourceRoot(), 'config', 'app-worker.example.yaml'), path.join(repoRoot, 'config', 'app-worker.example.yaml'));
   copyTemplate(paths.storage, path.join(resourceRoot(), 'config', 'storage.example.yaml'), path.join(repoRoot, 'config', 'storage.example.yaml'));
-  if (!fs.existsSync(paths.env)) fs.writeFileSync(paths.env, 'STOCK_APP_WORKER_TOKEN=\nSTOCK_APP_PUBLISHER_TOKEN=\nTUSHARE_TOKEN=\n', 'utf8');
+  if (!fs.existsSync(paths.env)) fs.writeFileSync(paths.env, 'STOCK_APP_WORKER_TOKEN=\nTUSHARE_TOKEN=\n', 'utf8');
 }
 
 function copyTemplate(target, packagedTemplate, devTemplate) {
@@ -115,7 +115,6 @@ function loadSettings() {
   return {
     appBaseUrl: config.app_base_url || 'http://127.0.0.1:3000',
     workerTokenEnv: config.worker_token_env || 'STOCK_APP_WORKER_TOKEN',
-    publisherTokenEnv: config.publisher_token_env || 'STOCK_APP_PUBLISHER_TOKEN',
     tushareTokenEnv: config.tushare_token_env || 'TUSHARE_TOKEN',
     analysisClaimPath: config.analysis_claim_path || '/api/worker/analysis-requests/claim',
     analysisResultPath: config.analysis_result_path_template || '/api/worker/analysis-requests/{requestId}/result',
@@ -145,7 +144,6 @@ function saveSettings(settings) {
     `app_base_url: ${settings.appBaseUrl || 'http://127.0.0.1:3000'}`,
     'worker_id: local-worker',
     `worker_token_env: ${settings.workerTokenEnv || 'STOCK_APP_WORKER_TOKEN'}`,
-    `publisher_token_env: ${settings.publisherTokenEnv || 'STOCK_APP_PUBLISHER_TOKEN'}`,
     `tushare_token_env: ${settings.tushareTokenEnv || 'TUSHARE_TOKEN'}`,
     `poll_interval_seconds: ${Number(settings.stockAnalysisPollSeconds || 15)}`,
     `holding_price_poll_interval_seconds: ${Number(settings.holdingPricePollSeconds || 300)}`,

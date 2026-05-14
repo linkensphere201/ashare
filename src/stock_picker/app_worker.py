@@ -361,12 +361,16 @@ def _open_json(request: urllib.request.Request) -> dict[str, Any]:
 
 def _token(config: WorkerConfig, token_kind: str) -> str | None:
     primary = _token_env_name(config, token_kind)
-    fallback = "PUBLISHER_TOKEN" if token_kind == "publisher" else "WORKER_TOKEN"
-    return _env_value(primary, config.local_env_path) or _env_value(fallback, config.local_env_path)
+    token = _env_value(primary, config.local_env_path) or _env_value("WORKER_TOKEN", config.local_env_path)
+    if token or token_kind != "publisher":
+        return token
+    if config.publisher_token_env != primary:
+        token = _env_value(config.publisher_token_env, config.local_env_path)
+    return token or _env_value("PUBLISHER_TOKEN", config.local_env_path)
 
 
 def _token_env_name(config: WorkerConfig, token_kind: str) -> str:
-    return config.publisher_token_env if token_kind == "publisher" else config.worker_token_env
+    return config.worker_token_env
 
 
 def _load_holding_watchlist(config: WorkerConfig, mock_watchlist_path: Path | None) -> dict[str, Any]:
@@ -527,7 +531,7 @@ def _worker_defaults() -> dict[str, Any]:
         "app_base_url": "http://127.0.0.1:3000",
         "worker_id": "local-worker",
         "worker_token_env": "STOCK_APP_WORKER_TOKEN",
-        "publisher_token_env": "STOCK_APP_PUBLISHER_TOKEN",
+        "publisher_token_env": "STOCK_APP_WORKER_TOKEN",
         "tushare_token_env": "TUSHARE_TOKEN",
         "poll_interval_seconds": 15.0,
         "holding_price_poll_interval_seconds": 300.0,
