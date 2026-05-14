@@ -363,6 +363,49 @@ def test_daily_check_auto_pipeline_refreshes_before_selecting_factor_run(tmp_pat
     assert response["candidate_pool"]["internal_diagnostics"]["factor_run_id"] == "factor_002_new"
 
 
+def test_daily_check_auto_pipeline_reuses_active_workflow_until_upload_succeeds(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_storage_config(tmp_path)
+    assert init_storage(config_path).ok
+    _write_market_status_inputs(tmp_path)
+    worker_config = tmp_path / "config" / "app-worker.yaml"
+    worker_config.write_text("", encoding="utf-8")
+    upload_path = tmp_path / "daily-upload.json"
+    calls: list[str] = []
+
+    class Result:
+        def __init__(self, ok: bool, message: str) -> None:
+            self.ok = ok
+            self.message = message
+
+    def fake_sync_report_workflow(**kwargs):
+        workflow_id = str(kwargs["workflow_id"])
+        calls.append(workflow_id)
+        if len(calls) == 1:
+            return Result(False, "interrupted")
+        _write_factor_run_with_ten_tradable(tmp_path, "factor_002_resumed")
+        metadata_path = tmp_path / "data" / "reports" / "factor_exploration" / "factor_002_resumed" / "factor_run_metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["created_at"] = "2026-05-06T16:00:00+00:00"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        return Result(True, "resumed")
+
+    monkeypatch.setattr("stock_picker.app_worker.sync_report_workflow", fake_sync_report_workflow)
+
+    first = run_daily_check(config_path, worker_config, mock_upload=True, mock_upload_path=upload_path, auto_pipeline=True)
+    state_path = tmp_path / "data" / "reports" / "app_worker" / "daily_upload_state.json"
+    failed_state = json.loads(state_path.read_text(encoding="utf-8"))
+    second = run_daily_check(config_path, worker_config, mock_upload=True, mock_upload_path=upload_path, auto_pipeline=True)
+    completed_state = json.loads(state_path.read_text(encoding="utf-8"))
+
+    assert not first.ok
+    assert second.ok
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert failed_state["active_daily_workflow"]["workflow_id"] == calls[0]
+    assert failed_state["active_daily_workflow"]["status"] == "failed"
+    assert "active_daily_workflow" not in completed_state
+
+
 def test_daily_check_rejects_upload_when_candidate_pool_is_not_top_10(tmp_path: Path) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok

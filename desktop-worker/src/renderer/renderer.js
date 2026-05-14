@@ -12,6 +12,7 @@ const logOutput = document.querySelector('#log-output');
 const runtimeState = document.querySelector('#runtime-state');
 const latestWorkflow = document.querySelector('#latest-workflow');
 const workerState = document.querySelector('#worker-state');
+let activeOutputSelector = null;
 
 document.querySelectorAll('.nav').forEach((button) => {
   button.addEventListener('click', () => {
@@ -35,11 +36,11 @@ document.querySelector('#stop-command').addEventListener('click', async () => {
 document.querySelector('#start-worker').addEventListener('click', async () => renderWorkerStatus(await window.stockPicker.startWorker()));
 document.querySelector('#stop-worker').addEventListener('click', async () => renderWorkerStatus(await window.stockPicker.stopWorker()));
 
-window.stockPicker.onCommandLog((payload) => appendLog(payload.text));
+window.stockPicker.onCommandLog((payload) => appendOutput(payload.text));
 window.stockPicker.onWorkerStatus((payload) => renderWorkerStatus(payload));
 window.stockPicker.onWorkflowEvent((event) => {
   latestWorkflow.textContent = `${event.workflow_id || 'workflow'} / ${event.status || event.event}`;
-  appendLog(`${formatWorkflowEvent(event)}\n`);
+  appendOutput(`${formatWorkflowEvent(event)}\n`);
 });
 
 window.stockPicker.getSettings().then((settings) => {
@@ -104,11 +105,13 @@ async function runMappedCommand(name) {
 
 async function run(args, outputSelector) {
   runtimeState.textContent = 'Running';
-  appendLog(`$ stock-picker ${args.join(' ')}\n`);
+  activeOutputSelector = outputSelector || null;
+  if (outputSelector) document.querySelector(outputSelector).textContent = '';
+  appendOutput(`$ stock-picker ${args.join(' ')}\n`);
   const result = await window.stockPicker.runCommand(args);
   runtimeState.textContent = result.ok ? 'Idle' : 'Failed';
-  if (outputSelector) document.querySelector(outputSelector).textContent = result.output || result.errorOutput;
-  appendLog(`\n[exit ${result.code}]\n`);
+  appendOutput(`\n[exit ${result.code}]\n`);
+  activeOutputSelector = null;
 }
 
 function clean(items) {
@@ -186,4 +189,13 @@ function formatWorkflowEvent(event) {
 function appendLog(text) {
   logOutput.textContent += text;
   logOutput.scrollTop = logOutput.scrollHeight;
+}
+
+function appendOutput(text) {
+  appendLog(text);
+  if (!activeOutputSelector) return;
+  const target = document.querySelector(activeOutputSelector);
+  if (!target) return;
+  target.textContent += text;
+  target.scrollTop = target.scrollHeight;
 }
