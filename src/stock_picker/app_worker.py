@@ -30,7 +30,6 @@ class WorkerConfig:
     app_base_url: str
     worker_id: str
     worker_token_env: str
-    publisher_token_env: str
     tushare_token_env: str
     poll_interval_seconds: float
     holding_price_poll_interval_seconds: float
@@ -68,7 +67,6 @@ def load_worker_config(path: Path) -> WorkerConfig:
         app_base_url=str(data.get("app_base_url", defaults["app_base_url"])).rstrip("/"),
         worker_id=str(data.get("worker_id", defaults["worker_id"])),
         worker_token_env=str(data.get("worker_token_env", defaults["worker_token_env"])),
-        publisher_token_env=str(data.get("publisher_token_env", defaults["publisher_token_env"])),
         tushare_token_env=str(data.get("tushare_token_env", defaults["tushare_token_env"])),
         poll_interval_seconds=float(stock_task.get("poll_interval_seconds", data.get("poll_interval_seconds", defaults["poll_interval_seconds"]))),
         holding_price_poll_interval_seconds=float(holding_task.get("poll_interval_seconds", data.get("holding_price_poll_interval_seconds", defaults["holding_price_poll_interval_seconds"]))),
@@ -313,7 +311,7 @@ def _upload_daily_bundle(config: WorkerConfig, payload: dict[str, Any], mock_out
         _write_json(mock_output_path, payload)
         metadata = payload.get("bundle_metadata", {})
         return {"status": "mock_uploaded", "bundle_id": metadata.get("bundle_id")}
-    return _post_json(config, config.daily_bundle_publish_path, payload, token_kind="publisher")
+    return _post_json(config, config.daily_bundle_publish_path, payload, token_kind="worker")
 
 
 def _upload_holding_prices(config: WorkerConfig, payload: dict[str, Any], mock_output_path: Path | None = None) -> dict[str, Any]:
@@ -361,12 +359,7 @@ def _open_json(request: urllib.request.Request) -> dict[str, Any]:
 
 def _token(config: WorkerConfig, token_kind: str) -> str | None:
     primary = _token_env_name(config, token_kind)
-    token = _env_value(primary, config.local_env_path) or _env_value("WORKER_TOKEN", config.local_env_path)
-    if token or token_kind != "publisher":
-        return token
-    if config.publisher_token_env != primary:
-        token = _env_value(config.publisher_token_env, config.local_env_path)
-    return token or _env_value("PUBLISHER_TOKEN", config.local_env_path)
+    return _env_value(primary, config.local_env_path) or _env_value("WORKER_TOKEN", config.local_env_path)
 
 
 def _token_env_name(config: WorkerConfig, token_kind: str) -> str:
@@ -531,7 +524,6 @@ def _worker_defaults() -> dict[str, Any]:
         "app_base_url": "http://127.0.0.1:3000",
         "worker_id": "local-worker",
         "worker_token_env": "STOCK_APP_WORKER_TOKEN",
-        "publisher_token_env": "STOCK_APP_WORKER_TOKEN",
         "tushare_token_env": "TUSHARE_TOKEN",
         "poll_interval_seconds": 15.0,
         "holding_price_poll_interval_seconds": 300.0,

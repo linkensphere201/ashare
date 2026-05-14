@@ -303,7 +303,7 @@ def test_worker_run_once_accepts_stock_app_camel_case_task(tmp_path: Path) -> No
     assert response["result_artifact_json"]["stock"]["symbol"] == "600519.SH"
 
 
-def test_daily_check_mock_uploads_bundle_and_skips_duplicate_hash(tmp_path: Path) -> None:
+def test_daily_check_mock_uploads_bundle_and_skips_duplicate_hash(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_storage_config(tmp_path)
     assert init_storage(config_path).ok
     _write_factor_run_with_ten_tradable(tmp_path, "factor_002_test")
@@ -311,6 +311,7 @@ def test_daily_check_mock_uploads_bundle_and_skips_duplicate_hash(tmp_path: Path
     worker_config = tmp_path / "config" / "app-worker.yaml"
     worker_config.write_text("worker_id: local-test-worker\n", encoding="utf-8")
     upload_path = tmp_path / "daily-upload.json"
+    monkeypatch.setattr("stock_picker.publish._now", lambda: "2026-04-28T09:30:00+00:00")
 
     first = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=10)
     second = run_daily_check(config_path, worker_config, trade_date="2026-04-28", mock_upload=True, mock_upload_path=upload_path, top=10)
@@ -407,7 +408,6 @@ def test_daily_check_reports_missing_worker_token(tmp_path: Path, monkeypatch) -
     worker_config.write_text("worker_token_env: TEST_STOCK_WORKER_TOKEN\ndefault_factor_run_id: factor_002_test\n", encoding="utf-8")
     monkeypatch.delenv("TEST_STOCK_WORKER_TOKEN", raising=False)
     monkeypatch.delenv("WORKER_TOKEN", raising=False)
-    monkeypatch.delenv("PUBLISHER_TOKEN", raising=False)
 
     result = run_daily_check(config_path, worker_config, trade_date="2026-04-28")
 
