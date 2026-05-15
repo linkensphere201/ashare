@@ -10,6 +10,7 @@ const logOutput = document.querySelector('#log-output');
 let currentSettings = null;
 let durationTimer = null;
 let lastManualStatus = null;
+let lastWorkerStatus = null;
 
 document.querySelectorAll('.nav').forEach((button) => {
   button.addEventListener('click', () => {
@@ -54,6 +55,15 @@ window.stockPicker.getSettings().then((settings) => {
 });
 window.stockPicker.getWorkerStatus().then(renderWorkerStatus);
 window.stockPicker.getManualTaskStatus().then(renderManualTaskStatus);
+window.stockPicker.getRecentLogs().then((text) => {
+  if (text) {
+    logOutput.textContent = text;
+    logOutput.scrollTop = logOutput.scrollHeight;
+  }
+});
+setInterval(() => {
+  if (lastWorkerStatus) renderWorkerStatus(lastWorkerStatus);
+}, 1000);
 
 async function runMappedCommand(name) {
   if (!currentSettings) currentSettings = await window.stockPicker.getSettings();
@@ -161,10 +171,11 @@ function updateDuration() {
 
 function renderWorkerStatus(status) {
   if (!status) return;
+  lastWorkerStatus = status;
   const runningText = status.running ? 'Yes' : 'No';
   const statusText = status.running ? status.status : 'Stopped';
   const taskText = status.taskType || 'idle';
-  const nextText = formatNextSchedules(status.nextSchedules);
+  const nextText = status.running ? formatNextSchedules(status.nextSchedules) : '-';
   const message = `${status.message || ''}${status.lastError ? `\n${status.lastError}` : ''}`.trim() || (status.running ? 'Worker running.' : 'Worker stopped.');
 
   document.querySelector('#worker-enabled').textContent = runningText;

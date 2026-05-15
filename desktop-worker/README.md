@@ -51,14 +51,14 @@ Copy the worker config example in the parent repository:
 copy ..\config\app-worker.example.yaml ..\config\app-worker.yaml
 ```
 
-Set the worker token through the environment or `.env`:
+Set the stock-app API token through the environment or `.env`:
 
 ```text
-STOCK_APP_WORKER_TOKEN=your-worker-token
+APP_API_TOKEN=your-app-api-token
 TUSHARE_TOKEN=your-tushare-token
 ```
 
-The same worker token is used for analysis jobs, daily bundle publish, and holding-price APIs. `app-worker.yaml` should store token env names only. The UI must not display token values.
+The same `APP_API_TOKEN` is used for analysis jobs, daily bundle publish, and holding-price APIs. `app-worker.yaml` should store token env names only. The UI must not display token values.
 
 ## Unit Test Plan
 

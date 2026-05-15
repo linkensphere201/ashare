@@ -362,6 +362,7 @@ def run_holding_price_refresh(
     limit: int | None = None,
     json_events: bool = False,
 ) -> WorkerResult:
+    _ensure_no_proxy()
     worker_config = load_worker_config(worker_config_path)
     if not worker_config.holding_price_enabled:
         return WorkerResult(True, "holding price worker disabled")
@@ -526,14 +527,15 @@ def _post_json(config: WorkerConfig, path: str, payload: dict[str, Any], token_k
     token = _token(config, token_kind)
     if not token:
         raise ValueError(f"missing required environment variable: {_token_env_name(config, token_kind)}")
+    url = config.app_base_url + path
     data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     request = urllib.request.Request(
-        config.app_base_url + path,
+        url,
         data=data,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
         method="POST",
     )
-    return _open_json(request)
+    return _open_json(request, url)
 
 
 def _get_json(config: WorkerConfig, path: str, token_kind: str) -> dict[str, Any]:
@@ -541,33 +543,36 @@ def _get_json(config: WorkerConfig, path: str, token_kind: str) -> dict[str, Any
     token = _token(config, token_kind)
     if not token:
         raise ValueError(f"missing required environment variable: {_token_env_name(config, token_kind)}")
+    url = config.app_base_url + path
     request = urllib.request.Request(
-        config.app_base_url + path,
+        url,
         headers={"Authorization": f"Bearer {token}"},
         method="GET",
     )
-    return _open_json(request)
+    return _open_json(request, url)
 
 
-def _open_json(request: urllib.request.Request) -> dict[str, Any]:
+def _open_json(request: urllib.request.Request, url: str) -> dict[str, Any]:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(request, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
-        message = f"app worker API failed: HTTP {error.code}"
+        message = f"app worker API failed: HTTP {error.code}; url={url}"
         if body:
             message = f"{message}: {body}"
         raise RuntimeError(message) from error
     except urllib.error.URLError as error:
-        raise RuntimeError(f"app worker API network error: {error.reason}") from error
+        raise RuntimeError(f"app worker API network error: {error.reason}; url={url}") from error
 
 
 def _ensure_no_proxy() -> None:
     merged = _expected_no_proxy()
     os.environ["NO_PROXY"] = merged
     os.environ["no_proxy"] = merged
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(name, None)
 
 
 def _expected_no_proxy() -> str:
@@ -588,7 +593,7 @@ def _merge_no_proxy(*values: str | None) -> str:
 
 def _token(config: WorkerConfig, token_kind: str) -> str | None:
     primary = _token_env_name(config, token_kind)
-    return _env_value(primary, config.local_env_path) or _env_value("WORKER_TOKEN", config.local_env_path)
+    return _env_value(primary, config.local_env_path)
 
 
 def _token_env_name(config: WorkerConfig, token_kind: str) -> str:
@@ -845,7 +850,7 @@ def _worker_defaults() -> dict[str, Any]:
     return {
         "app_base_url": "http://127.0.0.1:3000",
         "worker_id": "local-worker",
-        "worker_token_env": "STOCK_APP_WORKER_TOKEN",
+        "worker_token_env": "APP_API_TOKEN",
         "tushare_token_env": "TUSHARE_TOKEN",
         "poll_interval_seconds": 15.0,
         "holding_price_poll_interval_seconds": 300.0,

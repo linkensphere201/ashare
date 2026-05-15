@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('stockPicker', {
   stopWorker: () => ipcRenderer.invoke('stop-worker'),
   getWorkerStatus: () => ipcRenderer.invoke('get-worker-status'),
   getManualTaskStatus: () => ipcRenderer.invoke('get-manual-task-status'),
+  getRecentLogs: () => ipcRenderer.invoke('get-recent-logs'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   notify: (title, body) => ipcRenderer.invoke('show-notification', title, body),

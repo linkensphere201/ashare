@@ -123,13 +123,39 @@ function ensurePortableFiles() {
   fs.mkdirSync(paths.state, { recursive: true });
   copyTemplate(paths.appWorker, path.join(resourceRoot(), 'config', 'app-worker.example.yaml'), path.join(repoRoot, 'config', 'app-worker.example.yaml'));
   copyTemplate(paths.storage, path.join(resourceRoot(), 'config', 'storage.example.yaml'), path.join(repoRoot, 'config', 'storage.example.yaml'));
-  if (!fs.existsSync(paths.env)) fs.writeFileSync(paths.env, 'STOCK_APP_WORKER_TOKEN=\nTUSHARE_TOKEN=\n', 'utf8');
+  if (!fs.existsSync(paths.env)) fs.writeFileSync(paths.env, 'APP_API_TOKEN=\nTUSHARE_TOKEN=\n', 'utf8');
+  migrateTokenConfig(paths);
 }
 
 function copyTemplate(target, packagedTemplate, devTemplate) {
   if (fs.existsSync(target)) return;
   const source = fs.existsSync(packagedTemplate) ? packagedTemplate : devTemplate;
   if (fs.existsSync(source)) fs.copyFileSync(source, target);
+}
+
+function migrateTokenConfig(paths) {
+  if (fs.existsSync(paths.appWorker)) {
+    const original = fs.readFileSync(paths.appWorker, 'utf8');
+    const migrated = original.replace(/worker_token_env:\s*STOCK_APP_WORKER_TOKEN/g, 'worker_token_env: APP_API_TOKEN');
+    if (migrated !== original) fs.writeFileSync(paths.appWorker, migrated, 'utf8');
+  }
+  if (fs.existsSync(paths.env)) {
+    const text = fs.readFileSync(paths.env, 'utf8');
+    const values = parseEnvText(text);
+    if (!values.APP_API_TOKEN && values.STOCK_APP_WORKER_TOKEN) {
+      fs.writeFileSync(paths.env, `${text.replace(/\s*$/, '')}\nAPP_API_TOKEN=${values.STOCK_APP_WORKER_TOKEN}\n`, 'utf8');
+    }
+  }
+}
+
+function parseEnvText(text) {
+  const values = {};
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim() || line.trim().startsWith('#') || !line.includes('=')) continue;
+    const [key, ...rest] = line.split('=');
+    values[key.trim()] = rest.join('=').trim().replace(/^["']|["']$/g, '');
+  }
+  return values;
 }
 
 function runtimeCommand() {
@@ -168,7 +194,7 @@ function saveSettings(settings) {
     `app_base_url: ${settings.appBaseUrl || 'http://127.0.0.1:3000'}`,
     `storage_config_path: ${settings.storagePath || configPaths().storage}`,
     'worker_id: local-worker',
-    'worker_token_env: STOCK_APP_WORKER_TOKEN',
+    'worker_token_env: APP_API_TOKEN',
     'tushare_token_env: TUSHARE_TOKEN',
     `poll_interval_seconds: ${Number(settings.stockAnalysisPollSeconds || 15)}`,
     `holding_price_poll_interval_seconds: ${Number(settings.holdingPricePollSeconds || 300)}`,
@@ -262,7 +288,7 @@ function pythonCommand(args, eventChannel, taskType, manualTaskType = null) {
     const runtime = runtimeCommand();
     const paths = configPaths();
     const env = loadEnv(paths.env);
-    activeTaskContext = { taskType, manualTaskType, lastStageKey: null };
+    activeTaskContext = { taskType, manualTaskType, lastStageKey: null, lastProgressLogAt: 0, lastProgressMessage: '' };
     if (!manualTaskType) setWorkerState({ running: workerRunning, taskType, status: 'running', step: 'starting', message: `stock-picker ${args.join(' ')}`, lastError: null });
     if (manualTaskType) {
       setManualTaskState({
@@ -332,6 +358,9 @@ function runtimeEnv(localEnv) {
     NO_PROXY: noProxy,
     no_proxy: noProxy
   };
+  for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) {
+    delete merged[key];
+  }
   return merged;
 }
 
@@ -356,7 +385,7 @@ function parseJsonEvents(text, context = null) {
       mainWindow?.webContents.send('workflow-event', uiEvent);
       if (uiEvent.ui_log !== false) {
         appendLog(formatWorkflowEvent(uiEvent));
-        notifyWorkflowEvent(uiEvent);
+        if (uiEvent.ui_notify !== false) notifyWorkflowEvent(uiEvent);
       }
       if (context?.manualTaskType) updateManualTaskFromEvent(uiEvent, context);
       if (!context?.manualTaskType) {
@@ -392,6 +421,7 @@ function normalizeUiEvent(event, context) {
   const status = mapped.status || event.status || event.event || 'running';
   const stageChanged = context.lastStageKey !== mapped.stageKey;
   const terminal = /completed|failed|skipped/.test(String(status)) || /completed|failed/.test(String(event.event || ''));
+  const progressLog = shouldLogManualProgress(event, context);
   context.lastStageKey = mapped.stageKey;
   return {
     ...event,
@@ -401,8 +431,27 @@ function normalizeUiEvent(event, context) {
     step_total: mapped.stageTotal,
     status,
     message: mapped.message || event.message || mapped.stageName,
-    ui_log: stageChanged || terminal
+    ui_log: stageChanged || terminal || progressLog,
+    ui_notify: stageChanged || terminal
   };
+}
+
+function shouldLogManualProgress(event, context) {
+  if (context.manualTaskType !== 'sync') return false;
+  const eventName = String(event.event || '');
+  if (eventName !== 'step_progress') return false;
+  const message = String(event.message || '');
+  const now = Date.now();
+  if (message && message !== context.lastProgressMessage) {
+    context.lastProgressMessage = message;
+    context.lastProgressLogAt = now;
+    return true;
+  }
+  if (now - context.lastProgressLogAt >= 10000) {
+    context.lastProgressLogAt = now;
+    return true;
+  }
+  return false;
 }
 
 function mapManualStage(taskType, event) {
@@ -522,11 +571,33 @@ function appendLog(text) {
   fs.appendFileSync(path.join(paths.logs, 'worker.log'), text, 'utf8');
 }
 
+function appendUiLog(message) {
+  const line = `[${new Date().toLocaleTimeString()}] ${message}\n`;
+  appendLog(line);
+  mainWindow?.webContents.send('command-log', { stream: 'worker', text: line });
+}
+
+function readRecentLogs(maxBytes = 40000) {
+  const logPath = path.join(configPaths().logs, 'worker.log');
+  if (!fs.existsSync(logPath)) return '';
+  const stats = fs.statSync(logPath);
+  const start = Math.max(0, stats.size - maxBytes);
+  const handle = fs.openSync(logPath, 'r');
+  try {
+    const buffer = Buffer.alloc(stats.size - start);
+    fs.readSync(handle, buffer, 0, buffer.length, start);
+    return buffer.toString('utf8');
+  } finally {
+    fs.closeSync(handle);
+  }
+}
+
 function startWorker() {
   if (workerRunning) return workerState;
   workerRunning = true;
   stopAfterCurrent = false;
   retryState.clear();
+  appendUiLog('worker started');
   scheduleAll();
   setWorkerState({ running: true, status: 'idle', message: 'Worker started' });
   return workerState;
@@ -536,12 +607,14 @@ function stopWorker() {
   stopAfterCurrent = true;
   workerRunning = false;
   clearTimers();
-  setWorkerState({ running: false, status: activeProcess ? 'stopping' : 'idle', message: activeProcess ? 'Worker stopping after current task...' : 'Worker stopped' });
+  appendUiLog(activeProcess ? 'worker stop requested; current task will finish first' : 'worker stopped');
+  setWorkerState({ running: false, status: activeProcess ? 'stopping' : 'idle', message: activeProcess ? 'Worker stopping after current task...' : 'Worker stopped', nextSchedules: {} });
   return workerState;
 }
 
 function restartWorkerIfRunning() {
   if (!workerRunning) return;
+  appendUiLog('worker settings changed; rescheduling tasks');
   clearTimers();
   scheduleAll();
 }
@@ -549,6 +622,7 @@ function restartWorkerIfRunning() {
 function scheduleAll() {
   clearTimers();
   const settings = loadSettings();
+  appendUiLog(`worker schedule loaded: stock_analysis=${settings.stockAnalysisEnabled ? `${settings.stockAnalysisPollSeconds}s` : 'disabled'}, daily_bundle=${settings.dailyBundleEnabled ? `${settings.dailyBundleCheckSeconds}s` : 'disabled'}, holding_prices=${settings.holdingPriceEnabled ? `${settings.holdingPricePollSeconds}s` : 'disabled'}`);
   if (settings.stockAnalysisEnabled) scheduleTask('stock_analysis', settings.stockAnalysisPollSeconds, () => runAnalysisPoll());
   if (settings.holdingPriceEnabled) scheduleTask('holding_prices', settings.holdingPricePollSeconds, () => runHoldingRefresh());
   if (settings.dailyBundleEnabled) scheduleTask('daily_bundle', settings.dailyBundleCheckSeconds, () => runDailyCheck());
@@ -561,38 +635,45 @@ function scheduleTask(name, intervalSeconds, fn) {
     const delay = Math.max(1, Number(delaySeconds || normalDelay));
     const nextRunAt = new Date(Date.now() + delay * 1000).toISOString();
     setNextSchedule(name, nextRunAt);
+    appendUiLog(`${workerTaskLabel(name)} scheduled in ${delay}s at ${new Date(nextRunAt).toLocaleTimeString()}`);
     const timer = setTimeout(run, delay * 1000);
     timers.push(timer);
   };
   const run = async () => {
     if (!workerRunning || stopAfterCurrent) return;
     if (activeProcess) {
+      appendUiLog(`${workerTaskLabel(name)} delayed because another task is running`);
       scheduleNext(Math.min(10, normalDelay));
       return;
     }
     try {
       setNextSchedule(name, null);
+      appendUiLog(`${workerTaskLabel(name)} started`);
       const result = await fn();
       if (!workerRunning || stopAfterCurrent) return;
       if (result && result.ok === false) {
         const text = [result.errorOutput, result.output].filter(Boolean).join('\n');
         const status = classifyError(text);
         const retryDelay = retryDelaySeconds(name, status);
+        appendUiLog(`${workerTaskLabel(name)} failed: ${status}${retryDelay !== null ? `; retry in ${retryDelay}s` : ''}`);
         setWorkerState({ taskType: name, status, lastError: text || 'Task failed', message: status });
         if (retryDelay === null && status !== 'local_data_missing') return;
         scheduleNext(retryDelay ?? normalDelay);
         return;
       }
       retryState.delete(name);
+      appendUiLog(`${workerTaskLabel(name)} completed`);
       scheduleNext(normalDelay);
     } catch (error) {
       if (!workerRunning || stopAfterCurrent) return;
       const status = classifyError(error);
       const retryDelay = retryDelaySeconds(name, status);
+      appendUiLog(`${workerTaskLabel(name)} failed: ${String(error)}${retryDelay !== null ? `; retry in ${retryDelay}s` : ''}`);
       setWorkerState({ taskType: name, status, lastError: String(error), message: String(error) });
       if (retryDelay !== null || status === 'local_data_missing') scheduleNext(retryDelay ?? normalDelay);
     }
   };
+  appendUiLog(`${workerTaskLabel(name)} initial check scheduled now`);
   setTimeout(run, 500);
 }
 
@@ -602,20 +683,33 @@ function clearTimers() {
 }
 
 function runAnalysisPoll() {
-  return pythonCommand(['app-worker', 'run-once', '--worker-config', configPaths().appWorker, '--config', loadSettings().storagePath], 'command-log', 'stock_analysis');
+  const settings = loadSettings();
+  appendUiLog(`Stock analysis queue target: ${settings.appBaseUrl}/api/worker/analysis-requests/claim`);
+  return pythonCommand(['app-worker', 'run-once', '--worker-config', configPaths().appWorker, '--config', settings.storagePath], 'command-log', 'stock_analysis');
 }
 
 function runHoldingRefresh() {
-  return pythonCommand(['app-worker', 'refresh-holding-prices', '--worker-config', configPaths().appWorker, '--config', loadSettings().storagePath], 'command-log', 'holding_prices');
+  const settings = loadSettings();
+  appendUiLog(`Holding prices target: ${settings.appBaseUrl}/api/worker/holding-prices/watchlist`);
+  return pythonCommand(['app-worker', 'refresh-holding-prices', '--worker-config', configPaths().appWorker, '--config', settings.storagePath], 'command-log', 'holding_prices');
 }
 
 function runDailyCheck() {
   const settings = loadSettings();
   if (!isAfterTime(settings.earliestDailyPublishTime)) {
+    appendUiLog(`Daily bundle skipped: waiting for publish window ${settings.earliestDailyPublishTime}`);
     setWorkerState({ taskType: 'daily_bundle', status: 'waiting_for_publish_window', message: `Waiting for ${settings.earliestDailyPublishTime}` });
     return Promise.resolve({ ok: true, code: 0, output: '', errorOutput: '' });
   }
   return pythonCommand(['app-worker', 'daily-check', '--worker-config', configPaths().appWorker, '--config', settings.storagePath, '--auto-pipeline', '--json-events'], 'command-log', 'daily_bundle');
+}
+
+function workerTaskLabel(taskName) {
+  return {
+    stock_analysis: 'Stock analysis queue',
+    daily_bundle: 'Daily bundle',
+    holding_prices: 'Holding prices'
+  }[taskName] || taskName;
 }
 
 function isAfterTime(value) {
@@ -728,6 +822,7 @@ ipcMain.handle('start-worker', async () => startWorker());
 ipcMain.handle('stop-worker', async () => stopWorker());
 ipcMain.handle('get-worker-status', async () => workerState);
 ipcMain.handle('get-manual-task-status', async () => manualTaskState);
+ipcMain.handle('get-recent-logs', async () => readRecentLogs());
 ipcMain.handle('get-settings', async () => loadSettings());
 ipcMain.handle('save-settings', async (_event, settings) => saveSettings(settings));
 ipcMain.handle('show-notification', async (_event, title, body) => {
