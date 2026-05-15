@@ -178,11 +178,15 @@ function renderWorkerStatus(status) {
   const statusText = status.running ? status.status : 'Stopped';
   const taskText = status.taskType || 'idle';
   const nextRows = formatNextScheduleRows(status.running ? status.nextSchedules : null);
-  const message = `${status.message || ''}${status.lastError ? `\n${status.lastError}` : ''}`.trim() || (status.running ? 'Worker running.' : 'Worker stopped.');
+  const message = `${status.message || ''}${status.lastError ? `\n${status.lastError}` : ''}${status.lastHeartbeatError ? `\nHeartbeat: ${status.lastHeartbeatError}` : ''}`.trim() || (status.running ? 'Worker running.' : 'Worker stopped.');
+  const heartbeatStatus = status.lastHeartbeatStatus || 'unknown';
+  const heartbeatAt = status.lastHeartbeatAt ? formatDateTime(new Date(status.lastHeartbeatAt)) : '-';
 
   document.querySelector('#worker-enabled').textContent = runningText;
   document.querySelector('#worker-state').textContent = statusText;
   document.querySelector('#worker-task').textContent = taskText;
+  document.querySelector('#worker-heartbeat-status').textContent = heartbeatStatus;
+  document.querySelector('#worker-heartbeat-at').textContent = heartbeatAt;
   renderNextRows('#worker-next', nextRows);
   document.querySelector('#worker-message').textContent = message;
 
@@ -191,6 +195,8 @@ function renderWorkerStatus(status) {
   document.querySelector('#worker-page-task').textContent = taskText;
   document.querySelector('#worker-page-step').textContent = status.step || '-';
   document.querySelector('#worker-page-progress').textContent = `${status.stepIndex || 0}/${status.stepTotal || 0}`;
+  document.querySelector('#worker-page-heartbeat-status').textContent = heartbeatStatus;
+  document.querySelector('#worker-page-heartbeat-at').textContent = heartbeatAt;
   renderNextRows('#worker-page-next', nextRows);
   document.querySelector('#worker-page-message').textContent = message;
 }

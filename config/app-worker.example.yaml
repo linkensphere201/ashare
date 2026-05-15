@@ -5,6 +5,7 @@ tushare_token_env: TUSHARE_TOKEN
 log_level: info
 poll_interval_seconds: 15
 holding_price_poll_interval_seconds: 300
+worker_status_interval_seconds: 30
 daily_bundle_check_interval_seconds: 900
 earliest_daily_publish_time: "16:30"
 default_factor_run_id:
@@ -15,6 +16,7 @@ api_paths:
   daily_bundle_publish: /api/publish/daily-bundles
   holding_watchlist: /api/worker/holding-prices/watchlist
   holding_prices: /api/worker/holding-prices
+  worker_status: /api/worker/status
 tasks:
   stock_analysis:
     enabled: true

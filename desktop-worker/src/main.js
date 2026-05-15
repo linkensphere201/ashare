@@ -1,6 +1,8 @@
 const { app, BrowserWindow, Menu, Notification, Tray, ipcMain, nativeImage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const http = require('node:http');
+const https = require('node:https');
 const { spawn } = require('node:child_process');
 
 let mainWindow;
@@ -12,6 +14,7 @@ let workerState = defaultWorkerState();
 let manualTaskState = defaultManualTaskState();
 let activeTaskContext = null;
 let timers = [];
+let heartbeatTimer = null;
 const retryState = new Map();
 const notificationState = new Map();
 const automaticJobState = loadAutomaticJobState();
@@ -209,9 +212,13 @@ function loadSettings() {
     stockAnalysisPollSeconds: Number(config.poll_interval_seconds || 15),
     dailyBundleCheckSeconds: Number(config.daily_bundle_check_interval_seconds || 900),
     holdingPricePollSeconds: Number(config.holding_price_poll_interval_seconds || 300),
+    workerStatusIntervalSeconds: Number(config.worker_status_interval_seconds || 30),
     dailyBundleAllowedWindows: normalizeAllowedWindows(config.daily_bundle_allowed_windows),
     earliestDailyPublishTime: config.earliest_daily_publish_time || '16:30',
     logLevel: normalizeLogLevel(config.log_level || 'info'),
+    workerId: config.worker_id || 'local-worker',
+    workerTokenEnv: config.worker_token_env || 'APP_API_TOKEN',
+    workerStatusPath: config.worker_status_path || '/api/worker/status',
     root: configPaths().root,
     appWorkerPath: configPaths().appWorker,
     storagePath: config.storage_config_path || configPaths().storage,
@@ -230,6 +237,7 @@ function saveSettings(settings) {
     `log_level: ${normalizeLogLevel(settings.logLevel || 'info')}`,
     `poll_interval_seconds: ${Number(settings.stockAnalysisPollSeconds || 15)}`,
     `holding_price_poll_interval_seconds: ${Number(settings.holdingPricePollSeconds || 300)}`,
+    `worker_status_interval_seconds: ${Number(settings.workerStatusIntervalSeconds || 30)}`,
     `daily_bundle_check_interval_seconds: ${Number(settings.dailyBundleCheckSeconds || 900)}`,
     `earliest_daily_publish_time: "${settings.earliestDailyPublishTime || '16:30'}"`,
     'api_paths:',
@@ -238,6 +246,7 @@ function saveSettings(settings) {
     '  daily_bundle_publish: /api/publish/daily-bundles',
     '  holding_watchlist: /api/worker/holding-prices/watchlist',
     '  holding_prices: /api/worker/holding-prices',
+    '  worker_status: /api/worker/status',
     'tasks:',
     '  stock_analysis:',
     `    enabled: ${settings.stockAnalysisEnabled !== false}`,
@@ -312,7 +321,8 @@ function apiPathKey(key) {
     analysis_result: 'analysis_result_path_template',
     daily_bundle_publish: 'daily_bundle_publish_path',
     holding_watchlist: 'holding_watchlist_path',
-    holding_prices: 'holding_prices_path'
+    holding_prices: 'holding_prices_path',
+    worker_status: 'worker_status_path'
   }[key] || key;
 }
 
@@ -706,6 +716,7 @@ function startWorker() {
   stopAfterCurrent = false;
   retryState.clear();
   appendUiLog('worker started');
+  startHeartbeat();
   scheduleAll();
   setWorkerState({ running: true, status: 'idle', message: 'Worker started' });
   return workerState;
@@ -715,6 +726,7 @@ function stopWorker() {
   stopAfterCurrent = true;
   workerRunning = false;
   clearTimers();
+  stopHeartbeat();
   appendUiLog(activeProcess ? 'worker stop requested; current task will finish first' : 'worker stopped');
   setWorkerState({ running: false, status: activeProcess ? 'stopping' : 'idle', message: activeProcess ? 'Worker stopping after current task...' : 'Worker stopped', nextSchedules: {} });
   return workerState;
@@ -724,6 +736,7 @@ function restartWorkerIfRunning() {
   if (!workerRunning) return;
   appendUiLog('worker settings changed; rescheduling tasks');
   clearTimers();
+  startHeartbeat();
   scheduleAll();
 }
 
@@ -817,6 +830,146 @@ function clearTimers() {
   timers = [];
 }
 
+function startHeartbeat() {
+  stopHeartbeat();
+  sendHeartbeat('online', 'Worker scheduler running');
+  const settings = loadSettings();
+  const intervalMs = Math.max(5, Number(settings.workerStatusIntervalSeconds || 30)) * 1000;
+  heartbeatTimer = setInterval(() => {
+    if (workerRunning && !stopAfterCurrent) sendHeartbeat('online', 'Worker scheduler running');
+  }, intervalMs);
+}
+
+function stopHeartbeat() {
+  if (!heartbeatTimer) return;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+async function sendHeartbeat(status, message) {
+  const settings = loadSettings();
+  const env = loadEnv(configPaths().env);
+  const token = env[settings.workerTokenEnv] || process.env[settings.workerTokenEnv];
+  const payload = {
+    worker_id: settings.workerId,
+    status,
+    worker_version: workerVersion(),
+    capabilities: workerCapabilities(settings),
+    message: sanitizeHeartbeatMessage(message)
+  };
+  if (!token) {
+    const error = `missing required environment variable: ${settings.workerTokenEnv}`;
+    updateHeartbeatState('error', error);
+    if (shouldEmitThrottledLog('worker_status:error', 60 * 1000)) appendUiLog(`Worker heartbeat failed: ${error}`, 'error');
+    notifyAutomaticTask('worker_status', 'error', error);
+    return;
+  }
+  try {
+    const response = await postJson(buildApiUrl(settings.appBaseUrl, settings.workerStatusPath), payload, token);
+    updateHeartbeatState(String(response.status || status), null);
+    appendUiLog(`Worker heartbeat ${response.status || status}`, 'debug');
+  } catch (error) {
+    const messageText = sanitizeHeartbeatMessage(String(error));
+    updateHeartbeatState('error', messageText);
+    if (shouldEmitThrottledLog('worker_status:error', 60 * 1000)) appendUiLog(`Worker heartbeat failed: ${messageText}`, 'warn');
+    notifyAutomaticTask('worker_status', 'error', messageText);
+  }
+}
+
+function shouldEmitThrottledLog(key, throttleMs) {
+  const now = Date.now();
+  const stateKey = `log:${key}`;
+  const last = notificationState.get(stateKey) || 0;
+  if (now - last < throttleMs) return false;
+  notificationState.set(stateKey, now);
+  return true;
+}
+
+function buildApiUrl(baseUrl, apiPath) {
+  const base = String(baseUrl || '').replace(/\/+$/, '');
+  const suffix = String(apiPath || '').startsWith('/') ? apiPath : `/${apiPath || ''}`;
+  return `${base}${suffix}`;
+}
+
+function postJson(url, payload, token) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (error) {
+      reject(new Error(`invalid worker status URL: ${url}`));
+      return;
+    }
+    const data = JSON.stringify(payload);
+    const client = parsed.protocol === 'https:' ? https : http;
+    const request = client.request({
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: `${parsed.pathname}${parsed.search}`,
+      method: 'POST',
+      timeout: 15000,
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data)
+      }
+    }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => {
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`HTTP ${response.statusCode}: ${body.slice(0, 300)}`));
+          return;
+        }
+        try {
+          resolve(body ? JSON.parse(body) : {});
+        } catch (_) {
+          resolve({});
+        }
+      });
+    });
+    request.on('timeout', () => {
+      request.destroy(new Error('worker status request timed out'));
+    });
+    request.on('error', reject);
+    request.write(data);
+    request.end();
+  });
+}
+
+function updateHeartbeatState(status, error) {
+  setWorkerState({
+    lastHeartbeatAt: new Date().toISOString(),
+    lastHeartbeatStatus: status,
+    lastHeartbeatError: error
+  });
+}
+
+function workerCapabilities(settings) {
+  return {
+    daily_bundle: Boolean(settings.dailyBundleEnabled),
+    stock_analysis: Boolean(settings.stockAnalysisEnabled),
+    holding_prices: Boolean(settings.holdingPriceEnabled)
+  };
+}
+
+function workerVersion() {
+  try {
+    return app.getVersion();
+  } catch (_) {
+    return '0.1.0';
+  }
+}
+
+function sanitizeHeartbeatMessage(message) {
+  return String(message || '')
+    .replace(/[A-Za-z]:\\[^\s"'<>]+/g, '[local-path]')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+/gi, 'Bearer [token]')
+    .slice(0, 180);
+}
+
 function runAnalysisPoll() {
   const settings = loadSettings();
   appendUiLog(`Stock analysis queue target: ${settings.appBaseUrl}/api/worker/analysis-requests/claim`, 'debug');
@@ -838,7 +991,8 @@ function workerTaskLabel(taskName) {
   return {
     stock_analysis: 'Stock analysis queue',
     daily_bundle: 'Daily bundle',
-    holding_prices: 'Holding prices'
+    holding_prices: 'Holding prices',
+    worker_status: 'Worker heartbeat'
   }[taskName] || taskName;
 }
 
@@ -1000,6 +1154,9 @@ function defaultWorkerState() {
     stepTotal: 0,
     message: '',
     lastError: null,
+    lastHeartbeatAt: null,
+    lastHeartbeatStatus: 'unknown',
+    lastHeartbeatError: null,
     nextSchedules: {},
     updatedAt: new Date().toISOString()
   };
