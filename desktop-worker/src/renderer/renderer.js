@@ -1,7 +1,7 @@
 const titles = {
   home: ['Home', 'Manual task and background worker status.'],
   manual: ['Manual Task', 'Run fixed local worker tasks without debug parameters.'],
-  worker: ['Worker', 'Start, stop, and inspect the background worker.'],
+  worker: ['Automatic Task', 'Start, stop, and inspect the automatic worker.'],
   logs: ['Logs', 'Stage-level task output and summaries.'],
   settings: ['Settings', 'Local runtime settings.']
 };
@@ -46,8 +46,9 @@ window.stockPicker.getSettings().then((settings) => {
   setValue('#settings-app-base-url', settings.appBaseUrl);
   setValue('#settings-analysis-poll', settings.stockAnalysisPollSeconds);
   setValue('#settings-daily-check', settings.dailyBundleCheckSeconds);
-  setValue('#settings-daily-time', settings.earliestDailyPublishTime);
+  setValue('#settings-daily-windows', (settings.dailyBundleAllowedWindows || []).join(','));
   setValue('#settings-holding-poll', settings.holdingPricePollSeconds);
+  setValue('#settings-log-level', settings.logLevel || 'info');
   checked('#settings-analysis-enabled', settings.stockAnalysisEnabled);
   checked('#settings-daily-enabled', settings.dailyBundleEnabled);
   checked('#settings-holding-enabled', settings.holdingPriceEnabled);
@@ -77,7 +78,7 @@ async function runMappedCommand(name) {
   if (name === 'stock-analysis') {
     const symbol = value('#manual-analysis-symbol');
     if (!symbol) {
-      appendLog(`[${new Date().toLocaleTimeString()}] stock_analysis failed: symbol is required\n`);
+      appendLog(`[${formatDateTime()}] stock_analysis failed: symbol is required\n`);
       return;
     }
     await run(clean(['app-worker', 'analyze-stock', '--worker-config', workerConfig, '--symbol', symbol, '--json-events', ...args]), 'stock_analysis');
@@ -90,7 +91,7 @@ async function runMappedCommand(name) {
   if (name === 'save-settings') {
     const settings = await window.stockPicker.saveSettings(readSettings());
     currentSettings = settings;
-    appendLog(`[${new Date().toLocaleTimeString()}] settings saved: ${settings.appWorkerPath}\n`);
+    appendLog(`[${formatDateTime()}] settings saved: ${settings.appWorkerPath}\n`);
   }
 }
 
@@ -99,7 +100,7 @@ async function run(args, manualTaskType) {
   appendLog(`$ stock-picker ${args.join(' ')}\n`);
   const result = await window.stockPicker.runCommand(args, manualTaskType);
   document.querySelector('#top-runtime-state').textContent = result.ok ? 'Idle' : 'Failed';
-  appendLog(`[${new Date().toLocaleTimeString()}] exit ${result.code}\n`);
+  appendLog(`[${formatDateTime()}] exit ${result.code}\n`);
 }
 
 function clean(items) {
@@ -136,8 +137,9 @@ function readSettings() {
     appBaseUrl: value('#settings-app-base-url'),
     stockAnalysisPollSeconds: Number(value('#settings-analysis-poll') || 15),
     dailyBundleCheckSeconds: Number(value('#settings-daily-check') || 900),
-    earliestDailyPublishTime: value('#settings-daily-time') || '16:30',
+    dailyBundleAllowedWindows: value('#settings-daily-windows') || '16:00-24:00,00:00-10:00',
     holdingPricePollSeconds: Number(value('#settings-holding-poll') || 300),
+    logLevel: value('#settings-log-level') || 'info',
     stockAnalysisEnabled: document.querySelector('#settings-analysis-enabled')?.checked,
     dailyBundleEnabled: document.querySelector('#settings-daily-enabled')?.checked,
     holdingPriceEnabled: document.querySelector('#settings-holding-enabled')?.checked
@@ -175,13 +177,13 @@ function renderWorkerStatus(status) {
   const runningText = status.running ? 'Yes' : 'No';
   const statusText = status.running ? status.status : 'Stopped';
   const taskText = status.taskType || 'idle';
-  const nextText = status.running ? formatNextSchedules(status.nextSchedules) : '-';
+  const nextRows = formatNextScheduleRows(status.running ? status.nextSchedules : null);
   const message = `${status.message || ''}${status.lastError ? `\n${status.lastError}` : ''}`.trim() || (status.running ? 'Worker running.' : 'Worker stopped.');
 
   document.querySelector('#worker-enabled').textContent = runningText;
   document.querySelector('#worker-state').textContent = statusText;
   document.querySelector('#worker-task').textContent = taskText;
-  document.querySelector('#worker-next').textContent = nextText;
+  renderNextRows('#worker-next', nextRows);
   document.querySelector('#worker-message').textContent = message;
 
   document.querySelector('#worker-page-enabled').textContent = runningText;
@@ -189,16 +191,21 @@ function renderWorkerStatus(status) {
   document.querySelector('#worker-page-task').textContent = taskText;
   document.querySelector('#worker-page-step').textContent = status.step || '-';
   document.querySelector('#worker-page-progress').textContent = `${status.stepIndex || 0}/${status.stepTotal || 0}`;
-  document.querySelector('#worker-page-next').textContent = nextText;
+  renderNextRows('#worker-page-next', nextRows);
   document.querySelector('#worker-page-message').textContent = message;
 }
 
-function formatNextSchedules(nextSchedules) {
-  const entries = Object.entries(nextSchedules || {});
-  if (!entries.length) return '-';
-  return entries
-    .map(([task, time]) => `${workerTaskName(task)} ${formatCountdown(time)}`)
-    .join(' / ');
+function formatNextScheduleRows(nextSchedules) {
+  return ['daily_bundle', 'holding_prices', 'stock_analysis'].map((task) => ({
+    label: workerTaskName(task),
+    value: nextSchedules?.[task] ? `${formatCountdown(nextSchedules[task])} (${formatDateTime(new Date(nextSchedules[task]))})` : '-'
+  }));
+}
+
+function renderNextRows(selector, rows) {
+  const node = document.querySelector(selector);
+  if (!node) return;
+  node.innerHTML = rows.map((row) => `<div><span>${row.label}</span><strong>${row.value}</strong></div>`).join('');
 }
 
 function formatWorkflowEvent(event) {
@@ -206,7 +213,7 @@ function formatWorkflowEvent(event) {
   const progress = event.step_index && event.step_total ? ` ${event.step_index}/${event.step_total}` : '';
   const status = event.status || event.event || 'event';
   const message = event.message || '';
-  return `[${new Date().toLocaleTimeString()}] ${task}${progress} ${status}: ${message}`;
+  return `[${formatDateTime()}] ${task}${progress} ${status}: ${message}`;
 }
 
 function formatCountdown(value) {
@@ -222,6 +229,13 @@ function formatDuration(seconds) {
   if (minutes < 60) return `${minutes}m ${rest}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
+}
+
+function formatDateTime(date = new Date()) {
+  const input = date instanceof Date ? date : new Date(date);
+  if (!Number.isFinite(input.getTime())) return '-';
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${input.getFullYear()}-${pad(input.getMonth() + 1)}-${pad(input.getDate())} ${pad(input.getHours())}:${pad(input.getMinutes())}:${pad(input.getSeconds())}`;
 }
 
 function manualTaskName(taskType) {

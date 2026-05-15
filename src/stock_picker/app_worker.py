@@ -115,7 +115,9 @@ def run_worker_once(config_path: Path, worker_config_path: Path, mock_task_path:
             raise ValueError(result.message)
         response = _stock_analysis_upload_payload(payload)
         _upload_stock_analysis_result(worker_config, request_id, response, _mock_result_path(mock_task_path))
-        return WorkerResult(True, f"worker completed task: {request_id}")
+        summary = _stock_analysis_summary(payload)
+        suffix = f"; {summary}" if summary else ""
+        return WorkerResult(True, f"worker completed task: {request_id}{suffix}")
     except Exception as error:
         response = {
             "status": "failed",
@@ -169,8 +171,10 @@ def run_manual_stock_analysis(
     if not result.ok:
         _emit_worker_event(json_events, "stock_analysis", "failed", "analyze_stock", 3, 4, result.message, error=result.message)
         return WorkerResult(False, result.message)
-    _emit_worker_event(json_events, "stock_analysis", "completed", "write_summary", 4, 4, result.message)
-    return WorkerResult(True, result.message)
+    summary = _stock_analysis_summary(result.artifact)
+    message = f"{result.message}; {summary}" if summary else result.message
+    _emit_worker_event(json_events, "stock_analysis", "completed", "write_summary", 4, 4, message)
+    return WorkerResult(True, message)
 
 
 def run_daily_check(
@@ -400,7 +404,8 @@ def run_holding_price_refresh(
         _emit_worker_event(json_events, "holding_analysis", "running", "upload_prices", 3, 3, f"uploading {len(prices)} holding prices")
         response = _upload_holding_prices(worker_config, {"prices": prices}, mock_upload_path)
         suffix = f", skipped={len(skipped)}" if skipped else ""
-        message = f"holding prices uploaded: {len(prices)}{suffix}; status={response.get('status', 'ok')}"
+        summary = _holding_prices_summary(prices)
+        message = f"holding prices uploaded: {len(prices)}{suffix}; status={response.get('status', 'ok')}; prices={summary}"
         _emit_worker_event(json_events, "holding_analysis", "completed", "upload_prices", 3, 3, message)
         return WorkerResult(True, message)
     except Exception as error:
@@ -757,6 +762,36 @@ def _upload_response_summary(response: dict[str, Any]) -> dict[str, Any]:
         "error",
     ]
     return {key: response.get(key) for key in keys if key in response}
+
+
+def _stock_analysis_summary(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return ""
+    stock = payload.get("stock", {}) if isinstance(payload.get("stock"), dict) else {}
+    candidate = payload.get("candidate_status", {}) if isinstance(payload.get("candidate_status"), dict) else {}
+    notes = payload.get("risk_notes") if isinstance(payload.get("risk_notes"), list) else []
+    parts = [
+        f"symbol={stock.get('symbol') or payload.get('analysis_metadata', {}).get('symbol')}",
+        f"name={stock.get('stock_name') or '-'}",
+        f"in_candidate_pool={candidate.get('in_latest_candidate_pool')}",
+    ]
+    if candidate.get("total_score") is not None:
+        parts.append(f"score={_float(candidate.get('total_score')):.3f}")
+    if notes:
+        parts.append(f"risk_notes={'; '.join(str(item) for item in notes[:3])}")
+    return ", ".join(part for part in parts if part and not part.endswith("=None"))
+
+
+def _holding_prices_summary(prices: list[dict[str, Any]], limit: int = 8) -> str:
+    entries = []
+    for item in prices[:limit]:
+        entries.append(
+            f"{item.get('symbol')} {item.get('name') or '-'} "
+            f"last={item.get('last_price')} change={item.get('change_percent')}% quote_time={item.get('quote_time')}"
+        )
+    if len(prices) > limit:
+        entries.append(f"... +{len(prices) - limit} more")
+    return " | ".join(entries)
 
 
 def _load_json(path: Path) -> dict[str, Any]:

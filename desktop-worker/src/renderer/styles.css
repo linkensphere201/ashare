@@ -166,6 +166,25 @@ main {
   padding-top: 12px;
 }
 
+.next-runs {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  border-top: 1px solid #e7eeeb;
+  padding-top: 12px;
+}
+
+.next-runs div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.next-runs strong {
+  font-size: 14px;
+  text-align: right;
+}
+
 .status-message {
   color: #33423b;
   white-space: pre-wrap;

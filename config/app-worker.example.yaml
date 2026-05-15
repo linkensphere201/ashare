@@ -2,6 +2,7 @@ app_base_url: http://127.0.0.1:3000
 worker_id: local-worker
 worker_token_env: APP_API_TOKEN
 tushare_token_env: TUSHARE_TOKEN
+log_level: info
 poll_interval_seconds: 15
 holding_price_poll_interval_seconds: 300
 daily_bundle_check_interval_seconds: 900
@@ -22,6 +23,9 @@ tasks:
     enabled: true
     check_interval_seconds: 900
     earliest_publish_time: "16:30"
+    allowed_windows:
+      - "16:00-24:00"
+      - "00:00-10:00"
     upload_archive_max: 20
   holding_prices:
     enabled: true

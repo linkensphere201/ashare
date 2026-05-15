@@ -18,7 +18,7 @@
       <nav>
         <button class="nav active" data-view="home">Home</button>
         <button class="nav" data-view="manual">Manual Task</button>
-        <button class="nav" data-view="worker">Worker</button>
+        <button class="nav" data-view="worker">Automatic Task</button>
         <button class="nav" data-view="logs">Logs</button>
         <button class="nav" data-view="settings">Settings</button>
       </nav>
@@ -51,8 +51,8 @@
               <div><span>Enabled</span><strong id="worker-enabled">No</strong></div>
               <div><span>Status</span><strong id="worker-state">Stopped</strong></div>
               <div><span>Current task</span><strong id="worker-task">idle</strong></div>
-              <div><span>Next runs</span><strong id="worker-next">-</strong></div>
             </div>
+            <div id="worker-next" class="next-runs"></div>
             <p id="worker-message" class="status-message">Worker stopped.</p>
           </div>
         </div>
@@ -88,19 +88,19 @@
 
       <section id="worker" class="view">
         <div class="panel wide">
-          <h3>Worker status</h3>
+          <h3>Automatic Task status</h3>
           <div class="status-list compact">
             <div><span>Enabled</span><strong id="worker-page-enabled">No</strong></div>
             <div><span>Status</span><strong id="worker-page-status">Stopped</strong></div>
             <div><span>Current task</span><strong id="worker-page-task">idle</strong></div>
             <div><span>Step</span><strong id="worker-page-step">-</strong></div>
             <div><span>Progress</span><strong id="worker-page-progress">0/0</strong></div>
-            <div><span>Next runs</span><strong id="worker-page-next">-</strong></div>
           </div>
+          <div id="worker-page-next" class="next-runs"></div>
           <p id="worker-page-message" class="status-message">Worker stopped.</p>
         </div>
         <div class="panel wide">
-          <h3>Worker control</h3>
+          <h3>Automatic Task control</h3>
           <div class="actions">
             <button id="start-worker">Start Worker</button>
             <button id="stop-worker" class="danger">Stop Worker</button>
@@ -123,8 +123,9 @@
             <label>App base URL <input id="settings-app-base-url" value="http://127.0.0.1:3000" /></label>
             <label>Analysis poll seconds <input id="settings-analysis-poll" type="number" value="15" /></label>
             <label>Daily check seconds <input id="settings-daily-check" type="number" value="900" /></label>
-            <label>Daily earliest time <input id="settings-daily-time" value="16:30" /></label>
+            <label>Daily allowed windows <input id="settings-daily-windows" value="16:00-24:00,00:00-10:00" /></label>
             <label>Holding price poll seconds <input id="settings-holding-poll" type="number" value="300" /></label>
+            <label>Log level <input id="settings-log-level" value="info" /></label>
           </div>
           <div class="actions">
             <label><input id="settings-analysis-enabled" type="checkbox" checked /> Stock analysis queue</label>

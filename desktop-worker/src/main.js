@@ -14,6 +14,35 @@ let activeTaskContext = null;
 let timers = [];
 const retryState = new Map();
 const notificationState = new Map();
+const automaticJobState = loadAutomaticJobState();
+
+const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+const DEFAULT_DAILY_WINDOWS = ['16:00-24:00', '00:00-10:00'];
+
+const AUTOMATIC_JOBS = {
+  daily_bundle: {
+    label: 'Daily bundle',
+    mode: 'daily',
+    enabledKey: 'dailyBundleEnabled',
+    intervalKey: 'dailyBundleCheckSeconds',
+    windowsKey: 'dailyBundleAllowedWindows',
+    run: () => runDailyCheck()
+  },
+  holding_prices: {
+    label: 'Holding prices',
+    mode: 'periodic',
+    enabledKey: 'holdingPriceEnabled',
+    intervalKey: 'holdingPricePollSeconds',
+    run: () => runHoldingRefresh()
+  },
+  stock_analysis: {
+    label: 'Stock analysis',
+    mode: 'periodic',
+    enabledKey: 'stockAnalysisEnabled',
+    intervalKey: 'stockAnalysisPollSeconds',
+    run: () => runAnalysisPoll()
+  }
+};
 
 const MANUAL_STAGE_DEFINITIONS = {
   sync: [
@@ -180,7 +209,9 @@ function loadSettings() {
     stockAnalysisPollSeconds: Number(config.poll_interval_seconds || 15),
     dailyBundleCheckSeconds: Number(config.daily_bundle_check_interval_seconds || 900),
     holdingPricePollSeconds: Number(config.holding_price_poll_interval_seconds || 300),
+    dailyBundleAllowedWindows: normalizeAllowedWindows(config.daily_bundle_allowed_windows),
     earliestDailyPublishTime: config.earliest_daily_publish_time || '16:30',
+    logLevel: normalizeLogLevel(config.log_level || 'info'),
     root: configPaths().root,
     appWorkerPath: configPaths().appWorker,
     storagePath: config.storage_config_path || configPaths().storage,
@@ -196,6 +227,7 @@ function saveSettings(settings) {
     'worker_id: local-worker',
     'worker_token_env: APP_API_TOKEN',
     'tushare_token_env: TUSHARE_TOKEN',
+    `log_level: ${normalizeLogLevel(settings.logLevel || 'info')}`,
     `poll_interval_seconds: ${Number(settings.stockAnalysisPollSeconds || 15)}`,
     `holding_price_poll_interval_seconds: ${Number(settings.holdingPricePollSeconds || 300)}`,
     `daily_bundle_check_interval_seconds: ${Number(settings.dailyBundleCheckSeconds || 900)}`,
@@ -214,6 +246,8 @@ function saveSettings(settings) {
     `    enabled: ${settings.dailyBundleEnabled !== false}`,
     `    check_interval_seconds: ${Number(settings.dailyBundleCheckSeconds || 900)}`,
     `    earliest_publish_time: "${settings.earliestDailyPublishTime || '16:30'}"`,
+    '    allowed_windows:',
+    ...normalizeAllowedWindows(settings.dailyBundleAllowedWindows).map((item) => `      - "${item}"`),
     '    upload_archive_max: 20',
     '  holding_prices:',
     `    enabled: ${settings.holdingPriceEnabled !== false}`,
@@ -229,10 +263,17 @@ function parseWorkerYaml(text) {
   const config = {};
   let section = '';
   let nested = '';
+  let listKey = '';
   for (const rawLine of text.split(/\r?\n/)) {
     if (!rawLine.trim() || rawLine.trim().startsWith('#')) continue;
     const indent = rawLine.match(/^\s*/)[0].length;
     const line = rawLine.trim();
+    if (line.startsWith('- ') && listKey) {
+      const item = line.slice(2).trim().replace(/^["']|["']$/g, '');
+      config[listKey] = [...(config[listKey] || []), item];
+      continue;
+    }
+    listKey = '';
     if (!line.includes(':')) continue;
     const [key, ...rest] = line.split(':');
     const value = rest.join(':').trim().replace(/^["']|["']$/g, '');
@@ -243,6 +284,11 @@ function parseWorkerYaml(text) {
     }
     if (indent === 2 && !value) {
       nested = key.trim();
+      continue;
+    }
+    if (!value && section === 'tasks' && nested && indent >= 4) {
+      listKey = taskKey(nested, key.trim());
+      config[listKey] = [];
       continue;
     }
     const parsed = parseYamlValue(value);
@@ -276,8 +322,20 @@ function taskKey(task, key) {
   if (task === 'stock_analysis' && key === 'poll_interval_seconds') return 'poll_interval_seconds';
   if (task === 'daily_bundle' && key === 'check_interval_seconds') return 'daily_bundle_check_interval_seconds';
   if (task === 'daily_bundle' && key === 'earliest_publish_time') return 'earliest_daily_publish_time';
+  if (task === 'daily_bundle' && key === 'allowed_windows') return 'daily_bundle_allowed_windows';
   if (task === 'holding_prices' && key === 'poll_interval_seconds') return 'holding_price_poll_interval_seconds';
   return `${prefix}_${key}`;
+}
+
+function normalizeLogLevel(value) {
+  const level = String(value || 'info').trim().toLowerCase();
+  return LOG_LEVELS[level] ? level : 'info';
+}
+
+function normalizeAllowedWindows(value) {
+  const input = Array.isArray(value) ? value : String(value || '').split(',');
+  const windows = input.map((item) => String(item || '').trim()).filter(Boolean);
+  return windows.length ? windows : DEFAULT_DAILY_WINDOWS;
 }
 
 function pythonCommand(args, eventChannel, taskType, manualTaskType = null) {
@@ -314,16 +372,15 @@ function pythonCommand(args, eventChannel, taskType, manualTaskType = null) {
     activeProcess.stdout.on('data', (chunk) => {
       const text = chunk.toString();
       output += text;
-      appendLog(text);
-      if (!manualTaskType) mainWindow?.webContents.send(eventChannel, { stream: 'stdout', text });
-      else if (!isJsonOnlyChunk(text)) mainWindow?.webContents.send(eventChannel, { stream: 'stdout', text, rawOnly: true });
+      const jsonOnly = isJsonOnlyChunk(text);
+      if (!jsonOnly) writeLog(manualTaskType ? 'info' : 'debug', text, { emitUi: !manualTaskType, stream: 'stdout' });
+      if (manualTaskType && !jsonOnly && shouldLog('info')) mainWindow?.webContents.send(eventChannel, { stream: 'stdout', text, rawOnly: true });
       parseJsonEvents(text, activeTaskContext);
     });
     activeProcess.stderr.on('data', (chunk) => {
       const text = chunk.toString();
       errorOutput += text;
-      appendLog(text);
-      mainWindow?.webContents.send(eventChannel, { stream: 'stderr', text });
+      writeLog('error', text, { emitUi: true, stream: 'stderr' });
     });
     activeProcess.on('close', (code) => {
       activeProcess = null;
@@ -382,10 +439,12 @@ function parseJsonEvents(text, context = null) {
     try {
       const parsed = JSON.parse(line);
       const uiEvent = normalizeUiEvent(parsed, context);
-      mainWindow?.webContents.send('workflow-event', uiEvent);
+      const level = eventLogLevel(uiEvent);
+      const shouldEmitLog = uiEvent.ui_log !== false && shouldLog(level);
+      mainWindow?.webContents.send('workflow-event', { ...uiEvent, ui_log: shouldEmitLog });
       if (uiEvent.ui_log !== false) {
-        appendLog(formatWorkflowEvent(uiEvent));
-        if (uiEvent.ui_notify !== false) notifyWorkflowEvent(uiEvent);
+        writeLog(level, formatWorkflowEvent(uiEvent), { emitUi: true });
+        if (shouldEmitLog && uiEvent.ui_notify !== false) notifyWorkflowEvent(uiEvent);
       }
       if (context?.manualTaskType) updateManualTaskFromEvent(uiEvent, context);
       if (!context?.manualTaskType) {
@@ -411,11 +470,25 @@ function formatWorkflowEvent(event) {
   const progress = event.step_index && event.step_total ? ` ${event.step_index}/${event.step_total}` : '';
   const status = event.status || event.event || 'event';
   const message = event.message || '';
-  return `[${new Date().toLocaleTimeString()}] ${task}${step}${progress} ${status}: ${message}\n`;
+  return `[${formatDateTime()}] ${task}${step}${progress} ${status}: ${message}\n`;
+}
+
+function eventLogLevel(event) {
+  const status = String(event.status || event.event || '').toLowerCase();
+  if (status.includes('failed')) return 'error';
+  if (status.includes('retry')) return 'warn';
+  return 'info';
 }
 
 function normalizeUiEvent(event, context) {
-  if (!context?.manualTaskType) return event;
+  if (!context?.manualTaskType) {
+    const taskType = event.task_type || event.workflow_id || context?.taskType;
+    const status = String(event.status || event.event || '').toLowerCase();
+    if (AUTOMATIC_JOBS[taskType]?.mode === 'periodic' && !status.includes('failed')) {
+      return { ...event, ui_log: false, ui_notify: false };
+    }
+    return event;
+  }
   const mapped = mapManualStage(context.manualTaskType, event);
   if (!mapped) return { ...event, ui_log: false };
   const status = mapped.status || event.status || event.event || 'running';
@@ -554,6 +627,21 @@ function notifyWorkflowEvent(event) {
   new Notification({ title, body }).show();
 }
 
+function notifyAutomaticTask(taskName, level, message) {
+  if (!Notification.isSupported()) return;
+  const now = Date.now();
+  const normalizedLevel = level === 'error' ? 'error' : 'info';
+  const throttleMs = normalizedLevel === 'error' ? 60 * 1000 : 10 * 60 * 1000;
+  const key = `automatic:${taskName}:${normalizedLevel}`;
+  const last = notificationState.get(key) || 0;
+  if (now - last < throttleMs) return;
+  notificationState.set(key, now);
+  new Notification({
+    title: normalizedLevel === 'error' ? 'Stock Picker automatic task failed' : 'Stock Picker automatic task update',
+    body: `${workerTaskLabel(taskName)}: ${message}`.slice(0, 180)
+  }).show();
+}
+
 function loadEnv(envPath) {
   if (!fs.existsSync(envPath)) return {};
   const values = {};
@@ -565,16 +653,36 @@ function loadEnv(envPath) {
   return values;
 }
 
+function shouldLog(level) {
+  const configured = normalizeLogLevel(loadSettings().logLevel);
+  return LOG_LEVELS[normalizeLogLevel(level)] >= LOG_LEVELS[configured];
+}
+
 function appendLog(text) {
   const paths = configPaths();
   fs.mkdirSync(paths.logs, { recursive: true });
   fs.appendFileSync(path.join(paths.logs, 'worker.log'), text, 'utf8');
 }
 
-function appendUiLog(message) {
-  const line = `[${new Date().toLocaleTimeString()}] ${message}\n`;
-  appendLog(line);
-  mainWindow?.webContents.send('command-log', { stream: 'worker', text: line });
+function writeLog(level, text, options = {}) {
+  if (!shouldLog(level)) return;
+  appendLog(text);
+  if (options.emitUi) mainWindow?.webContents.send('command-log', { stream: options.stream || 'worker', text });
+}
+
+function appendUiLog(message, level = 'info') {
+  const line = `[${formatDateTime()}] ${message}\n`;
+  writeLog(level, line, { emitUi: true });
+}
+
+function formatDateTime(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function localDateKey(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 function readRecentLogs(maxBytes = 40000) {
@@ -622,85 +730,107 @@ function restartWorkerIfRunning() {
 function scheduleAll() {
   clearTimers();
   const settings = loadSettings();
-  appendUiLog(`worker schedule loaded: stock_analysis=${settings.stockAnalysisEnabled ? `${settings.stockAnalysisPollSeconds}s` : 'disabled'}, daily_bundle=${settings.dailyBundleEnabled ? `${settings.dailyBundleCheckSeconds}s` : 'disabled'}, holding_prices=${settings.holdingPriceEnabled ? `${settings.holdingPricePollSeconds}s` : 'disabled'}`);
-  if (settings.stockAnalysisEnabled) scheduleTask('stock_analysis', settings.stockAnalysisPollSeconds, () => runAnalysisPoll());
-  if (settings.holdingPriceEnabled) scheduleTask('holding_prices', settings.holdingPricePollSeconds, () => runHoldingRefresh());
-  if (settings.dailyBundleEnabled) scheduleTask('daily_bundle', settings.dailyBundleCheckSeconds, () => runDailyCheck());
+  appendUiLog(`worker schedule loaded: stock_analysis=${settings.stockAnalysisEnabled ? `${settings.stockAnalysisPollSeconds}s` : 'disabled'}, daily_bundle=${settings.dailyBundleEnabled ? `${settings.dailyBundleCheckSeconds}s` : 'disabled'}, holding_prices=${settings.holdingPriceEnabled ? `${settings.holdingPricePollSeconds}s` : 'disabled'}`, 'debug');
+  for (const [name, job] of Object.entries(AUTOMATIC_JOBS)) {
+    if (settings[job.enabledKey] !== false) scheduleAutomaticJob(name, job, settings, true);
+    else setNextSchedule(name, null);
+  }
 }
 
-function scheduleTask(name, intervalSeconds, fn) {
-  const normalDelay = Math.max(1, Number(intervalSeconds || 60));
-  const scheduleNext = (delaySeconds) => {
-    if (!workerRunning || stopAfterCurrent) return;
-    const delay = Math.max(1, Number(delaySeconds || normalDelay));
-    const nextRunAt = new Date(Date.now() + delay * 1000).toISOString();
-    setNextSchedule(name, nextRunAt);
-    appendUiLog(`${workerTaskLabel(name)} scheduled in ${delay}s at ${new Date(nextRunAt).toLocaleTimeString()}`);
-    const timer = setTimeout(run, delay * 1000);
-    timers.push(timer);
-  };
-  const run = async () => {
+function scheduleAutomaticJob(name, job, settings, initial = false, overrideDelaySeconds = null) {
+  if (!workerRunning || stopAfterCurrent) return;
+  const nextRunAt = nextRunForJob(name, job, settings, initial, overrideDelaySeconds);
+  if (!nextRunAt) {
+    setNextSchedule(name, null);
+    return;
+  }
+  setNextSchedule(name, nextRunAt.toISOString());
+  appendUiLog(`${workerTaskLabel(name)} scheduled at ${formatDateTime(nextRunAt)}`, 'debug');
+  const delayMs = Math.max(1, nextRunAt.getTime() - Date.now());
+  const timer = setTimeout(() => runAutomaticJob(name, job, settings), delayMs);
+  timers.push(timer);
+}
+
+async function runAutomaticJob(name, job, settings) {
     if (!workerRunning || stopAfterCurrent) return;
     if (activeProcess) {
-      appendUiLog(`${workerTaskLabel(name)} delayed because another task is running`);
-      scheduleNext(Math.min(10, normalDelay));
+      appendUiLog(`${workerTaskLabel(name)} delayed because another task is running`, 'debug');
+      scheduleAutomaticJob(name, job, settings, false, Math.min(10, normalIntervalSeconds(job, settings)));
       return;
     }
     try {
       setNextSchedule(name, null);
-      appendUiLog(`${workerTaskLabel(name)} started`);
-      const result = await fn();
+      appendUiLog(`${workerTaskLabel(name)} started`, 'debug');
+      const result = await job.run();
       if (!workerRunning || stopAfterCurrent) return;
       if (result && result.ok === false) {
         const text = [result.errorOutput, result.output].filter(Boolean).join('\n');
         const status = classifyError(text);
         const retryDelay = retryDelaySeconds(name, status);
-        appendUiLog(`${workerTaskLabel(name)} failed: ${status}${retryDelay !== null ? `; retry in ${retryDelay}s` : ''}`);
+        appendUiLog(`${workerTaskLabel(name)} failed: ${status}${retryDelay !== null ? `; retry in ${retryDelay}s` : ''}`, 'error');
+        notifyAutomaticTask(name, 'error', status);
         setWorkerState({ taskType: name, status, lastError: text || 'Task failed', message: status });
         if (retryDelay === null && status !== 'local_data_missing') return;
-        scheduleNext(retryDelay ?? normalDelay);
+        scheduleAutomaticJob(name, job, loadSettings(), false, retryDelay ?? normalIntervalSeconds(job, settings));
         return;
       }
       retryState.delete(name);
-      appendUiLog(`${workerTaskLabel(name)} completed`);
-      scheduleNext(normalDelay);
+      markAutomaticJobSuccess(name, result);
+      appendAutomaticResultLog(name, result);
+      scheduleAutomaticJob(name, job, loadSettings(), false);
     } catch (error) {
       if (!workerRunning || stopAfterCurrent) return;
       const status = classifyError(error);
       const retryDelay = retryDelaySeconds(name, status);
-      appendUiLog(`${workerTaskLabel(name)} failed: ${String(error)}${retryDelay !== null ? `; retry in ${retryDelay}s` : ''}`);
+      appendUiLog(`${workerTaskLabel(name)} failed: ${String(error)}${retryDelay !== null ? `; retry in ${retryDelay}s` : ''}`, 'error');
+      notifyAutomaticTask(name, 'error', String(error));
       setWorkerState({ taskType: name, status, lastError: String(error), message: String(error) });
-      if (retryDelay !== null || status === 'local_data_missing') scheduleNext(retryDelay ?? normalDelay);
+      if (retryDelay !== null || status === 'local_data_missing') scheduleAutomaticJob(name, job, loadSettings(), false, retryDelay ?? normalIntervalSeconds(job, settings));
     }
-  };
-  appendUiLog(`${workerTaskLabel(name)} initial check scheduled now`);
-  setTimeout(run, 500);
+}
+
+function nextRunForJob(name, job, settings, initial, overrideDelaySeconds) {
+  if (overrideDelaySeconds !== null && overrideDelaySeconds !== undefined) {
+    return new Date(Date.now() + Math.max(1, Number(overrideDelaySeconds)) * 1000);
+  }
+  if (job.mode === 'daily') return nextDailyRunAt(name, settings, initial);
+  const delay = initial ? 1 : normalIntervalSeconds(job, settings);
+  return new Date(Date.now() + delay * 1000);
+}
+
+function normalIntervalSeconds(job, settings) {
+  return Math.max(1, Number(settings[job.intervalKey] || 60));
+}
+
+function nextDailyRunAt(name, settings, initial) {
+  const today = localDateKey();
+  const state = automaticJobState[name] || {};
+  const windows = normalizeAllowedWindows(settings.dailyBundleAllowedWindows);
+  if (state.lastSuccessDate === today) return nextWindowStart(windows, new Date(startOfLocalDay(addDays(new Date(), 1)).getTime() - 1));
+  const now = new Date();
+  if (isWithinAnyWindow(now, windows)) return new Date(Date.now() + (initial ? 1000 : normalIntervalSeconds(AUTOMATIC_JOBS[name], settings) * 1000));
+  return nextWindowStart(windows, now);
 }
 
 function clearTimers() {
-  for (const timer of timers) clearInterval(timer);
+  for (const timer of timers) clearTimeout(timer);
   timers = [];
 }
 
 function runAnalysisPoll() {
   const settings = loadSettings();
-  appendUiLog(`Stock analysis queue target: ${settings.appBaseUrl}/api/worker/analysis-requests/claim`);
+  appendUiLog(`Stock analysis queue target: ${settings.appBaseUrl}/api/worker/analysis-requests/claim`, 'debug');
   return pythonCommand(['app-worker', 'run-once', '--worker-config', configPaths().appWorker, '--config', settings.storagePath], 'command-log', 'stock_analysis');
 }
 
 function runHoldingRefresh() {
   const settings = loadSettings();
-  appendUiLog(`Holding prices target: ${settings.appBaseUrl}/api/worker/holding-prices/watchlist`);
+  appendUiLog(`Holding prices target: ${settings.appBaseUrl}/api/worker/holding-prices/watchlist`, 'debug');
   return pythonCommand(['app-worker', 'refresh-holding-prices', '--worker-config', configPaths().appWorker, '--config', settings.storagePath], 'command-log', 'holding_prices');
 }
 
 function runDailyCheck() {
   const settings = loadSettings();
-  if (!isAfterTime(settings.earliestDailyPublishTime)) {
-    appendUiLog(`Daily bundle skipped: waiting for publish window ${settings.earliestDailyPublishTime}`);
-    setWorkerState({ taskType: 'daily_bundle', status: 'waiting_for_publish_window', message: `Waiting for ${settings.earliestDailyPublishTime}` });
-    return Promise.resolve({ ok: true, code: 0, output: '', errorOutput: '' });
-  }
   return pythonCommand(['app-worker', 'daily-check', '--worker-config', configPaths().appWorker, '--config', settings.storagePath, '--auto-pipeline', '--json-events'], 'command-log', 'daily_bundle');
 }
 
@@ -712,14 +842,6 @@ function workerTaskLabel(taskName) {
   }[taskName] || taskName;
 }
 
-function isAfterTime(value) {
-  const [hour, minute] = String(value || '16:30').split(':').map((part) => Number(part));
-  const now = new Date();
-  const target = new Date();
-  target.setHours(hour || 16, minute || 30, 0, 0);
-  return now >= target;
-}
-
 function classifyError(error) {
   const text = String(error);
   if (/401|403|token/i.test(text)) return 'auth_failed';
@@ -727,6 +849,105 @@ function classifyError(error) {
   if (/5\d\d|network/i.test(text)) return 'network_error';
   if (/Candidate 002 factor run|Tushare|no quote|empty watchlist|local data/i.test(text)) return 'local_data_missing';
   return 'failed';
+}
+
+function loadAutomaticJobState() {
+  try {
+    const statePath = path.join(configPaths().state, 'automatic-job-state.json');
+    if (!fs.existsSync(statePath)) return {};
+    return JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveAutomaticJobState() {
+  const paths = configPaths();
+  fs.mkdirSync(paths.state, { recursive: true });
+  fs.writeFileSync(path.join(paths.state, 'automatic-job-state.json'), JSON.stringify(automaticJobState, null, 2), 'utf8');
+}
+
+function markAutomaticJobSuccess(name, result) {
+  if (AUTOMATIC_JOBS[name]?.mode !== 'daily') return;
+  automaticJobState[name] = {
+    lastSuccessDate: localDateKey(),
+    lastSuccessAt: new Date().toISOString(),
+    lastResultSummary: summarizeProcessResult(result)
+  };
+  saveAutomaticJobState();
+}
+
+function appendAutomaticResultLog(name, result) {
+  const summary = summarizeProcessResult(result);
+  if (AUTOMATIC_JOBS[name]?.mode === 'periodic' && /queue empty|watchlist empty/i.test(summary)) {
+    appendUiLog(`${workerTaskLabel(name)} ok${summary ? `: ${summary}` : ''}`, 'debug');
+    return;
+  }
+  appendUiLog(`${workerTaskLabel(name)} ok${summary ? `: ${summary}` : ''}`, 'info');
+  notifyAutomaticTask(name, 'info', 'ok');
+}
+
+function summarizeProcessResult(result) {
+  const text = [result?.output, result?.errorOutput].filter(Boolean).join('\n');
+  if (!text) return '';
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (!line.startsWith('{') && !line.startsWith('[event]')) return line.slice(0, 500);
+  }
+  return '';
+}
+
+function parseTimeOfDay(value) {
+  const normalized = String(value || '00:00').trim();
+  if (normalized === '24:00') return 24 * 60;
+  const [hourRaw, minuteRaw] = normalized.split(':');
+  const hour = Math.max(0, Math.min(23, Number(hourRaw) || 0));
+  const minute = Math.max(0, Math.min(59, Number(minuteRaw) || 0));
+  return hour * 60 + minute;
+}
+
+function parseWindow(value) {
+  const [startRaw, endRaw] = String(value).split('-');
+  return { start: parseTimeOfDay(startRaw), end: parseTimeOfDay(endRaw || startRaw) };
+}
+
+function minutesSinceLocalMidnight(date) {
+  return date.getHours() * 60 + date.getMinutes();
+}
+
+function isWithinAnyWindow(date, windows) {
+  const minute = minutesSinceLocalMidnight(date);
+  return normalizeAllowedWindows(windows).some((item) => {
+    const window = parseWindow(item);
+    if (window.start <= window.end) return minute >= window.start && minute < window.end;
+    return minute >= window.start || minute < window.end;
+  });
+}
+
+function nextWindowStart(windows, fromDate) {
+  const candidates = [];
+  for (let dayOffset = 0; dayOffset <= 2; dayOffset += 1) {
+    const day = startOfLocalDay(addDays(fromDate, dayOffset));
+    for (const item of normalizeAllowedWindows(windows)) {
+      const window = parseWindow(item);
+      const candidate = new Date(day.getTime() + window.start * 60 * 1000);
+      if (candidate > fromDate) candidates.push(candidate);
+    }
+  }
+  return candidates.sort((left, right) => left.getTime() - right.getTime())[0] || new Date(Date.now() + 60 * 1000);
+}
+
+function startOfLocalDay(date) {
+  const output = new Date(date);
+  output.setHours(0, 0, 0, 0);
+  return output;
+}
+
+function addDays(date, days) {
+  const output = new Date(date);
+  output.setDate(output.getDate() + days);
+  return output;
 }
 
 function retryDelaySeconds(taskName, status) {
