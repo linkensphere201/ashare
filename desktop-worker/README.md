@@ -33,11 +33,12 @@ StockPickerWorker/
   resources/stock-picker-runtime.exe
 ```
 
-The executable stays resident in the tray, schedules background work, and exposes a compact UI for settings, current task progress, logs, and manual debug actions.
+The executable stays resident in the tray, schedules background work, and exposes a compact UI for settings, current task progress, logs, and manual debug actions. The UI also shows worker heartbeat status and last heartbeat time. Heartbeats are sent by the Electron main process directly to the app backend, independently of the Python task queue.
 
 The three Python worker commands remain debug/smoke entry points only:
 
 - `stock-picker app-worker daily-check`
+- `stock-picker app-worker analyze-stock`
 - `stock-picker app-worker run-once`
 - `stock-picker app-worker refresh-holding-prices`
 
@@ -58,7 +59,23 @@ APP_API_TOKEN=your-app-api-token
 TUSHARE_TOKEN=your-tushare-token
 ```
 
-The same `APP_API_TOKEN` is used for analysis jobs, daily bundle publish, and holding-price APIs. `app-worker.yaml` should store token env names only. The UI must not display token values.
+The same `APP_API_TOKEN` is used for analysis jobs, daily bundle publish, holding-price APIs, and worker heartbeats. `app-worker.yaml` should store token env names only. The UI must not display token values.
+
+`app-worker.yaml` also controls:
+
+- `worker_status_interval_seconds`, default 30.
+- `api_paths.worker_status`, default `/api/worker/status`.
+- `log_level`, default `info`.
+- Daily bundle allowed windows, default `16:00-24:00` and `00:00-10:00`.
+
+The worker status heartbeat request is:
+
+```text
+POST /api/worker/status
+Authorization: Bearer <APP_API_TOKEN>
+```
+
+The payload includes `worker_id`, `status`, `worker_version`, enabled `capabilities`, and a sanitized short message. It must not include local paths, provider credentials, or token values.
 
 ## Unit Test Plan
 
@@ -112,6 +129,7 @@ Optional local smoke against an existing Candidate 002 factor run:
 ```powershell
 .\.venv\Scripts\python.exe -m stock_picker.cli publish build-daily-bundle --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --top 10
 .\.venv\Scripts\python.exe -m stock_picker.cli app-worker daily-check --config config/storage.yaml --worker-config config/app-worker.yaml --mock-upload
+.\.venv\Scripts\python.exe -m stock_picker.cli app-worker analyze-stock --config config/storage.yaml --worker-config config/app-worker.yaml --symbol 600519.SH --json-events
 .\.venv\Scripts\python.exe -m stock_picker.cli app-worker refresh-holding-prices --config config/storage.yaml --worker-config config/app-worker.yaml --mock-watchlist .tmp\holding-watchlist.json --mock-upload-path .tmp\holding-prices.json
 .\.venv\Scripts\python.exe -m stock_picker.cli analysis stock --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --symbol 600519.SH
 .\.venv\Scripts\python.exe -m stock_picker.cli workflow stock-analysis --config config/storage.yaml --workflow-id smoke_stock_analysis --factor-run-id factor_002_latest_20260506 --symbol 600519.SH --trade-date 2026-05-06 --json-events
@@ -134,6 +152,16 @@ Default schedules:
 - Stock analysis queue: 15 seconds.
 - Holding price refresh: 300 seconds.
 - Daily bundle check: 900 seconds, not before `16:30` local time.
+- Worker heartbeat: 30 seconds while the scheduler is running.
+
+Daily bundle scheduling is limited to the configured allowed windows and records the latest successful local date in `state/automatic-job-state.json`. After a successful daily bundle run, the next daily run is scheduled for the next allowed window on a later local date.
+
+Automatic task retries:
+
+- Network errors and app 5xx responses retry with backoff.
+- Auth errors and app validation errors do not retry until configuration or payloads change.
+- Local data missing waits until the next normal schedule.
+- Periodic empty queue/watchlist results are logged at debug level instead of spamming the UI.
 
 Stop semantics:
 

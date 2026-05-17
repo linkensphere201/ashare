@@ -494,6 +494,7 @@ New stock-app boundary commands:
 | `stock-picker workflow stock-analysis` | Run stock analysis through the workflow state/event layer |
 | `stock-picker workflow status` | Show recent or specific workflow state |
 | `stock-picker workflow pause` | Mark a workflow paused at the next step boundary |
+| `stock-picker app-worker analyze-stock` | Run one local stock analysis through the worker event/output path |
 | `stock-picker app-worker run-once` | Claim and process at most one app-triggered stock analysis task |
 | `stock-picker app-worker run` | Poll the app stock-analysis queue repeatedly |
 | `stock-picker app-worker daily-check` | Build and upload the daily bundle when local data is ready and the bundle was not already uploaded |
@@ -506,11 +507,12 @@ stock-picker publish build-daily-bundle --config config/storage.yaml --factor-ru
 stock-picker analysis stock --config config/storage.yaml --factor-run-id factor_002_latest_20260506 --symbol 600519.SH
 stock-picker workflow sync-report --config config/storage.yaml --dry-run --json-events
 stock-picker app-worker daily-check --config config/storage.yaml --worker-config config/app-worker.yaml
+stock-picker app-worker analyze-stock --config config/storage.yaml --worker-config config/app-worker.yaml --symbol 600519.SH --json-events
 stock-picker app-worker run-once --config config/storage.yaml --worker-config config/app-worker.yaml
 stock-picker app-worker refresh-holding-prices --config config/storage.yaml --worker-config config/app-worker.yaml
 ```
 
-The daily upload path is `daily_publish_bundle_v001`; the old broad publish artifact is not a supported product path. The three `app-worker` commands are debug and smoke-test entry points. The production resident worker is the Windows portable executable under `desktop-worker/`, which schedules daily bundle generation, stock-analysis queue polling, and holding-price refresh in the background.
+The daily upload path is `daily_publish_bundle_v001`; the old broad publish artifact is not a supported product path. The `app-worker` commands are debug and smoke-test entry points. The production resident worker is the Windows portable executable under `desktop-worker/`, which schedules daily bundle generation, stock-analysis queue polling, and holding-price refresh in the background.
 
 Normal worker operation should not require a user to pass `factor_run_id`. The runtime resolves the latest local Candidate 002 factor run, while task/config/CLI values remain admin/debug overrides. Unit tests use mock worker tasks, mock daily uploads, and mock holding-price watchlists. Real Tushare sync and real stock-app backend upload are integration rehearsals, not unit-test targets.
 
@@ -529,15 +531,22 @@ StockPickerWorker/
   resources/stock-picker-runtime.exe
 ```
 
-`app-worker.yaml` contains backend URLs, configurable API paths, task enable flags, and intervals. It stores token environment variable names only; token values are read from process environment variables, exe-adjacent `.env`, or the project `.env` in development mode.
+`app-worker.yaml` contains backend URLs, configurable API paths, task enable flags, intervals, daily publish windows, and the worker heartbeat path. It stores token environment variable names only; token values are read from process environment variables, exe-adjacent `.env`, or the project `.env` in development mode.
 
 Default schedules:
 
 - stock analysis queue polling: 15 seconds.
 - holding price refresh: 300 seconds.
 - daily bundle check: 900 seconds and not before `16:30` local time.
+- worker status heartbeat: 30 seconds while the scheduler is running.
 
-The portable UI can start/stop scheduling, stop the current subprocess, edit task intervals and API paths, and display current task progress, next run, logs, and recent errors.
+The daily bundle scheduler also honors configured allowed windows. The default windows are `16:00-24:00` and `00:00-10:00`, and the worker records the latest successful daily run in `state/automatic-job-state.json` so the same local date is not repeatedly scheduled after a successful daily bundle run.
+
+The portable UI can start/stop scheduling, stop the current subprocess, edit task intervals, task enable flags, daily allowed windows, app base URL, storage path, and log level, and display current task progress, next run, logs, recent errors, heartbeat status, and last heartbeat time. API paths, heartbeat interval, worker id, and token environment variable names remain config-file fields. The worker writes logs according to `log_level`; normal periodic empty-queue or empty-watchlist events are reduced to debug output.
+
+The Electron main process sends worker heartbeats directly to `POST /api/worker/status`; this path is independent of the Python app task queue. The heartbeat body includes `worker_id`, `status`, `worker_version`, enabled capabilities, and a sanitized short message. It uses the configured worker token environment variable and never includes token values or local paths.
+
+Automatic task retry behavior is intentionally conservative: network errors and app 5xx failures retry with backoff, auth and validation errors do not retry automatically, and local data missing waits for the next normal schedule.
 
 #### App and Worker Flow
 

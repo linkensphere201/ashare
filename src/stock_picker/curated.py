@@ -1,4 +1,4 @@
-"""Curated data import helpers."""
+﻿"""Curated data import helpers."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import polars as pl
 
 from stock_picker.config import StorageConfig, load_storage_config
 from stock_picker.storage import StorageResult, initialize_metadata_catalog
+from stock_picker.tushare_mappings import map_tushare_raw_to_curated
 
 
 @dataclass(frozen=True)
@@ -666,167 +667,7 @@ def _load_raw_batches_for_run(
 
 
 def _map_tushare_raw_to_curated(frame: pl.DataFrame, dataset: str) -> pl.DataFrame:
-    if dataset == "security_master":
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("symbol"),
-                pl.col("symbol").alias("raw_symbol"),
-                pl.col("ts_code").str.split(".").list.get(1).alias("exchange"),
-                pl.lit("stock").alias("asset_type"),
-                _market_segment_expr().alias("market_segment"),
-                _market_segment_name_expr().alias("market_segment_name"),
-                _parse_yyyymmdd("list_date").alias("list_date"),
-                _parse_yyyymmdd("delist_date").alias("delist_date"),
-                pl.lit("active").alias("status"),
-            ]
-        ).select(
-            [
-                "symbol",
-                "raw_symbol",
-                "exchange",
-                "asset_type",
-                "name",
-                "market",
-                "market_segment",
-                "market_segment_name",
-                "area",
-                "industry",
-                "list_date",
-                "delist_date",
-                "status",
-            ]
-        )
-    if dataset == "trading_calendar":
-        return frame.with_columns(
-            [
-                pl.lit("cn_a_share").alias("calendar_id"),
-                _parse_yyyymmdd("cal_date").alias("trade_date"),
-                (pl.col("is_open").cast(pl.Int64, strict=False) == 1).alias("is_trading_day"),
-                _parse_yyyymmdd("pretrade_date").alias("previous_trade_date"),
-                pl.lit(None).alias("next_trade_date"),
-            ]
-        ).select(["calendar_id", "trade_date", "is_trading_day", "previous_trade_date", "next_trade_date"])
-    if dataset == "daily_prices":
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("symbol"),
-                _parse_yyyymmdd("trade_date").alias("trade_date"),
-                pl.lit("stock").alias("asset_type"),
-                pl.col("vol").alias("volume"),
-                pl.col("pct_chg").alias("pct_change"),
-            ]
-        ).select(["symbol", "trade_date", "asset_type", "open", "high", "low", "close", "pre_close", "volume", "amount", "pct_change"])
-    if dataset == "index_daily":
-        volume_expr = pl.col("vol").alias("volume") if "vol" in frame.columns else pl.lit(None).alias("volume")
-        amount_expr = pl.col("amount").alias("amount") if "amount" in frame.columns else pl.lit(None).alias("amount")
-        pct_change_expr = pl.col("pct_chg").alias("pct_change") if "pct_chg" in frame.columns else pl.lit(None).alias("pct_change")
-        pre_close_expr = pl.col("pre_close").alias("pre_close") if "pre_close" in frame.columns else pl.lit(None).alias("pre_close")
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("symbol"),
-                _parse_yyyymmdd("trade_date").alias("trade_date"),
-                pl.lit("index").alias("asset_type"),
-                volume_expr,
-                amount_expr,
-                pct_change_expr,
-                pre_close_expr,
-            ]
-        ).select(["symbol", "trade_date", "asset_type", "open", "high", "low", "close", "pre_close", "volume", "amount", "pct_change"])
-    if dataset == "adj_factor":
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("symbol"),
-                _parse_yyyymmdd("trade_date").alias("trade_date"),
-                pl.col("adj_factor").cast(pl.Float64, strict=False).alias("adj_factor"),
-            ]
-        ).select(["symbol", "trade_date", "adj_factor"])
-    if dataset == "daily_basic":
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("symbol"),
-                _parse_yyyymmdd("trade_date").alias("trade_date"),
-                pl.col("turnover_rate").cast(pl.Float64, strict=False).alias("turnover_rate"),
-            ]
-        ).select(["symbol", "trade_date", "turnover_rate"])
-    if dataset == "stk_limit":
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("symbol"),
-                _parse_yyyymmdd("trade_date").alias("trade_date"),
-                pl.col("up_limit").cast(pl.Float64, strict=False).alias("limit_up"),
-                pl.col("down_limit").cast(pl.Float64, strict=False).alias("limit_down"),
-            ]
-        ).select(["symbol", "trade_date", "limit_up", "limit_down"])
-    if dataset == "suspend_d":
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("symbol"),
-                _parse_yyyymmdd("trade_date").alias("trade_date"),
-                (pl.col("suspend_type") == "S").alias("is_suspended"),
-            ]
-        ).select(["symbol", "trade_date", "is_suspended"])
-    if dataset == "moneyflow_dc":
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("symbol"),
-                _parse_yyyymmdd("trade_date").alias("trade_date"),
-                pl.col("net_amount").alias("main_net_inflow"),
-                pl.col("net_amount_rate").alias("main_net_inflow_rate"),
-                pl.lit("tushare_moneyflow_dc").alias("data_method"),
-            ]
-        ).select(["symbol", "trade_date", "main_net_inflow", "main_net_inflow_rate", "data_method"])
-    if dataset == "cyq_perf":
-        data_method = (
-            pl.when(pl.col("provider_status") == "not_found")
-            .then(pl.lit("tushare_cyq_perf:not_found"))
-            .otherwise(pl.lit("tushare_cyq_perf"))
-            if "provider_status" in frame.columns
-            else pl.lit("tushare_cyq_perf")
-        )
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("symbol"),
-                _parse_yyyymmdd("trade_date").alias("trade_date"),
-                pl.col("winner_rate").alias("close_profit_ratio"),
-                data_method.alias("data_method"),
-            ]
-        ).select(["symbol", "trade_date", "close_profit_ratio", "data_method"])
-    if dataset == "index_classify":
-        parent_expr = pl.col("parent_code") if "parent_code" in frame.columns else pl.lit(None)
-        src_expr = pl.col("src") if "src" in frame.columns else pl.lit("SW2021")
-        return frame.with_columns(
-            [
-                pl.col("index_code").alias("index_code"),
-                pl.col("industry_name").alias("industry_name"),
-                pl.col("level").alias("level"),
-                src_expr.alias("source_system"),
-                parent_expr.alias("parent_code"),
-            ]
-        ).select(["index_code", "industry_name", "level", "source_system", "parent_code"])
-    if dataset == "sw_daily":
-        name_expr = pl.col("name").alias("industry_name") if "name" in frame.columns else pl.lit(None).alias("industry_name")
-        open_expr = pl.col("open").alias("open") if "open" in frame.columns else pl.lit(None).alias("open")
-        high_expr = pl.col("high").alias("high") if "high" in frame.columns else pl.lit(None).alias("high")
-        low_expr = pl.col("low").alias("low") if "low" in frame.columns else pl.lit(None).alias("low")
-        volume_expr = pl.col("vol").alias("volume") if "vol" in frame.columns else pl.lit(None).alias("volume")
-        amount_expr = pl.col("amount").alias("amount") if "amount" in frame.columns else pl.lit(None).alias("amount")
-        pct_change_expr = pl.col("pct_change").alias("pct_change") if "pct_change" in frame.columns else pl.col("pct_chg").alias("pct_change")
-        pre_close_expr = pl.col("pre_close").alias("pre_close") if "pre_close" in frame.columns else pl.lit(None).alias("pre_close")
-        return frame.with_columns(
-            [
-                pl.col("ts_code").alias("index_code"),
-                _parse_yyyymmdd("trade_date").alias("trade_date"),
-                name_expr,
-                open_expr,
-                high_expr,
-                low_expr,
-                pct_change_expr,
-                pre_close_expr,
-                volume_expr,
-                amount_expr,
-            ]
-        ).select(["index_code", "trade_date", "industry_name", "open", "high", "low", "close", "pre_close", "pct_change", "volume", "amount"])
-    raise ValueError(f"unsupported raw dataset mapping: {dataset}")
+    return map_tushare_raw_to_curated(frame, dataset)
 
 
 def _map_tushare_suspend_to_risk_events(frame: pl.DataFrame) -> pl.DataFrame:
@@ -1132,3 +973,4 @@ def _source_batch_id(dataset_id: str, source: str, input_path: Path, created_at:
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+

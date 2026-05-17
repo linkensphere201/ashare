@@ -191,170 +191,251 @@ def run_daily_check(
     json_events: bool = False,
     auto_pipeline: bool = False,
 ) -> WorkerResult:
-    config = load_storage_config(config_path)
-    worker_config = load_worker_config(worker_config_path)
-    if not worker_config.daily_bundle_enabled:
-        return WorkerResult(True, "daily bundle worker disabled")
-    state_path = _daily_upload_state_path(config)
-    state = _load_json(state_path)
-    _emit_worker_event(json_events, "daily_bundle", "started", "resolve_factor_run", 1, 4, "daily bundle check started")
-    if auto_pipeline and not factor_run_id:
-        workflow_id = _active_daily_workflow_id(state)
+    return DailyBundleJob(
+        config_path=config_path,
+        worker_config_path=worker_config_path,
+        factor_run_id=factor_run_id,
+        trade_date=trade_date,
+        previous_bundle_path=previous_bundle_path,
+        previous_candidate_pool_path=previous_candidate_pool_path,
+        top=top,
+        force=force,
+        mock_upload=mock_upload,
+        mock_upload_path=mock_upload_path,
+        json_events=json_events,
+        auto_pipeline=auto_pipeline,
+    ).run()
+
+
+class DailyBundleJob:
+    def __init__(
+        self,
+        *,
+        config_path: Path,
+        worker_config_path: Path,
+        factor_run_id: str | None,
+        trade_date: str | None,
+        previous_bundle_path: Path | None,
+        previous_candidate_pool_path: Path | None,
+        top: int,
+        force: bool,
+        mock_upload: bool,
+        mock_upload_path: Path | None,
+        json_events: bool,
+        auto_pipeline: bool,
+    ) -> None:
+        self.config_path = config_path
+        self.worker_config_path = worker_config_path
+        self.factor_run_id = factor_run_id
+        self.trade_date = trade_date
+        self.previous_bundle_path = previous_bundle_path
+        self.previous_candidate_pool_path = previous_candidate_pool_path
+        self.top = top
+        self.force = force
+        self.mock_upload = mock_upload
+        self.mock_upload_path = mock_upload_path
+        self.json_events = json_events
+        self.auto_pipeline = auto_pipeline
+        self.config = load_storage_config(config_path)
+        self.worker_config = load_worker_config(worker_config_path)
+        self.state_path = _daily_upload_state_path(self.config)
+        self.state = _load_json(self.state_path)
+
+    def run(self) -> WorkerResult:
+        if not self.worker_config.daily_bundle_enabled:
+            return WorkerResult(True, "daily bundle worker disabled")
+        self._event("started", "resolve_factor_run", 1, 4, "daily bundle check started")
+        pipeline_result = self._ensure_auto_pipeline()
+        if pipeline_result is not None:
+            return pipeline_result
+        selected_factor_run = self._resolve_factor_run()
+        if not selected_factor_run:
+            self._event("failed", "resolve_factor_run", 1, 4, "missing local Candidate 002 factor run")
+            return WorkerResult(False, "daily check requires a local Candidate 002 factor run")
+        bundle_result = self._build_bundle(selected_factor_run)
+        if not bundle_result.ok or not bundle_result.artifact:
+            self._event("failed", "build_bundle", 2, 4, bundle_result.message)
+            return WorkerResult(False, bundle_result.message)
+        if len(bundle_result.artifact.get("candidate_pool", {}).get("top_stocks", [])) != 10:
+            self._event("failed", "validate_bundle", 3, 4, "candidate_pool top_stocks is not 10")
+            return WorkerResult(False, "daily bundle upload requires exactly 10 candidate_pool top_stocks")
+        built = self._persist_bundle_built(bundle_result)
+        skip_result = self._dedupe_upload_decision(built)
+        if skip_result is not None:
+            return skip_result
+        return self._upload_and_persist(bundle_result, built)
+
+    def _ensure_auto_pipeline(self) -> WorkerResult | None:
+        if not self.auto_pipeline or self.factor_run_id:
+            return None
+        workflow_id = _active_daily_workflow_id(self.state)
         if workflow_id:
-            _emit_worker_event(json_events, "daily_bundle", "running", "sync_latest", 1, 4, f"resuming daily workflow: {workflow_id}")
+            self._event("running", "sync_latest", 1, 4, f"resuming daily workflow: {workflow_id}")
         else:
             workflow_id = f"daily_bundle_auto_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
-            _set_active_daily_workflow(state, workflow_id, "running")
-            _write_json(state_path, state)
-        _emit_worker_event(json_events, "daily_bundle", "running", "sync_latest", 1, 4, "syncing latest data and computing Candidate 002")
+            _set_active_daily_workflow(self.state, workflow_id, "running")
+            self._save_state()
+        self._event("running", "sync_latest", 1, 4, "syncing latest data and computing Candidate 002")
         try:
             pipeline = sync_report_workflow(
-                config_path=config_path,
+                config_path=self.config_path,
                 workflow_id=workflow_id,
                 dry_run=False,
                 confirmed=True,
                 start_date=None,
-                end_date=trade_date or worker_config.default_trade_date,
+                end_date=self.trade_date or self.worker_config.default_trade_date,
                 top=10,
-                emit=lambda event: _print_json_event(event) if json_events else None,
+                emit=lambda event: _print_json_event(event) if self.json_events else None,
             )
         except Exception as error:
-            state = _load_json(state_path)
-            _set_active_daily_workflow(state, workflow_id, "failed", str(error))
-            _write_json(state_path, state)
+            self.state = _load_json(self.state_path)
+            _set_active_daily_workflow(self.state, workflow_id, "failed", str(error))
+            self._save_state()
             return WorkerResult(False, str(error))
         if not pipeline.ok:
-            state = _load_json(state_path)
-            _set_active_daily_workflow(state, workflow_id, "failed", pipeline.message)
-            _write_json(state_path, state)
+            self.state = _load_json(self.state_path)
+            _set_active_daily_workflow(self.state, workflow_id, "failed", pipeline.message)
+            self._save_state()
             return WorkerResult(False, pipeline.message)
-        state = _load_json(state_path)
-        _set_active_daily_workflow(state, workflow_id, "pipeline_completed")
-        _write_json(state_path, state)
-    selected_factor_run = _resolve_factor_run_id(config_path, factor_run_id, worker_config, allow_config_default=not auto_pipeline)
-    if not selected_factor_run:
-        _emit_worker_event(json_events, "daily_bundle", "failed", "resolve_factor_run", 1, 4, "missing local Candidate 002 factor run")
-        return WorkerResult(False, "daily check requires a local Candidate 002 factor run")
-    _emit_worker_event(json_events, "daily_bundle", "running", "build_bundle", 2, 4, f"building bundle from {selected_factor_run}")
-    result = build_daily_bundle(
-        config_path,
-        factor_run_id=selected_factor_run,
-        trade_date=trade_date or worker_config.default_trade_date,
-        previous_bundle_path=previous_bundle_path,
-        previous_candidate_pool_path=previous_candidate_pool_path,
-        top=top,
-    )
-    if not result.ok or not result.artifact:
-        _emit_worker_event(json_events, "daily_bundle", "failed", "build_bundle", 2, 4, result.message)
-        return WorkerResult(False, result.message)
-    if len(result.artifact.get("candidate_pool", {}).get("top_stocks", [])) != 10:
-        _emit_worker_event(json_events, "daily_bundle", "failed", "validate_bundle", 3, 4, "candidate_pool top_stocks is not 10")
-        return WorkerResult(False, "daily bundle upload requires exactly 10 candidate_pool top_stocks")
+        self.state = _load_json(self.state_path)
+        _set_active_daily_workflow(self.state, workflow_id, "pipeline_completed")
+        self._save_state()
+        return None
 
-    payload = result.artifact
-    metadata = payload.get("bundle_metadata", {})
-    selected_date = str(metadata.get("trade_date"))
-    artifact_hash = str(metadata.get("bundle_hash") or _artifact_hash(payload))
-    bundle_path = str(result.artifact_path) if result.artifact_path else None
-    active_workflow_id = _active_daily_workflow_id(state)
-    _set_latest_daily_bundle_state(
-        state,
-        status="bundle_built",
-        trade_date=selected_date,
-        artifact_hash=artifact_hash,
-        bundle_path=bundle_path,
-        workflow_id=active_workflow_id,
-    )
-    _write_json(state_path, state)
-    previous = state.get("daily_bundle_uploads", {}).get(selected_date, {})
-    if not force and previous.get("artifact_hash") == artifact_hash:
+    def _resolve_factor_run(self) -> str | None:
+        return _resolve_factor_run_id(self.config_path, self.factor_run_id, self.worker_config, allow_config_default=not self.auto_pipeline)
+
+    def _build_bundle(self, selected_factor_run: str):
+        self._event("running", "build_bundle", 2, 4, f"building bundle from {selected_factor_run}")
+        return build_daily_bundle(
+            self.config_path,
+            factor_run_id=selected_factor_run,
+            trade_date=self.trade_date or self.worker_config.default_trade_date,
+            previous_bundle_path=self.previous_bundle_path,
+            previous_candidate_pool_path=self.previous_candidate_pool_path,
+            top=self.top,
+        )
+
+    def _persist_bundle_built(self, result) -> dict[str, Any]:
+        payload = result.artifact
+        metadata = payload.get("bundle_metadata", {})
+        selected_date = str(metadata.get("trade_date"))
+        artifact_hash = str(metadata.get("bundle_hash") or _artifact_hash(payload))
+        bundle_path = str(result.artifact_path) if result.artifact_path else None
+        active_workflow_id = _active_daily_workflow_id(self.state)
         _set_latest_daily_bundle_state(
-            state,
-            status="skipped_already_uploaded",
+            self.state,
+            status="bundle_built",
             trade_date=selected_date,
             artifact_hash=artifact_hash,
             bundle_path=bundle_path,
             workflow_id=active_workflow_id,
+        )
+        self._save_state()
+        return {
+            "payload": payload,
+            "selected_date": selected_date,
+            "artifact_hash": artifact_hash,
+            "bundle_path": bundle_path,
+            "active_workflow_id": active_workflow_id,
+        }
+
+    def _dedupe_upload_decision(self, built: dict[str, Any]) -> WorkerResult | None:
+        previous = self.state.get("daily_bundle_uploads", {}).get(built["selected_date"], {})
+        if self.force or previous.get("artifact_hash") != built["artifact_hash"]:
+            return None
+        _set_latest_daily_bundle_state(
+            self.state,
+            status="skipped_already_uploaded",
+            trade_date=built["selected_date"],
+            artifact_hash=built["artifact_hash"],
+            bundle_path=built["bundle_path"],
+            workflow_id=built["active_workflow_id"],
             archive_path=previous.get("archive_path"),
             remote_result_id=previous.get("remote_result_id"),
             upload_response=previous.get("upload_response") if isinstance(previous.get("upload_response"), dict) else None,
         )
-        _clear_active_daily_workflow(state)
-        _write_json(state_path, state)
-        _emit_worker_event(json_events, "daily_bundle", "skipped", "upload_bundle", 4, 4, f"already uploaded: {selected_date}")
-        return WorkerResult(True, f"daily bundle already uploaded: {selected_date} {artifact_hash}")
+        _clear_active_daily_workflow(self.state)
+        self._save_state()
+        self._event("skipped", "upload_bundle", 4, 4, f"already uploaded: {built['selected_date']}")
+        return WorkerResult(True, f"daily bundle already uploaded: {built['selected_date']} {built['artifact_hash']}")
 
-    upload_path = mock_upload_path or config.reports_root / "app_worker" / f"daily_bundle_upload_{selected_date.replace('-', '')}.json"
-    _emit_worker_event(json_events, "daily_bundle", "running", "upload_bundle", 4, 4, "uploading daily bundle")
-    _emit_worker_event(
-        json_events,
-        "daily_bundle",
-        "running",
-        "upload_bundle",
-        4,
-        4,
-        f"upload target: {worker_config.app_base_url}{worker_config.daily_bundle_publish_path}; no_proxy={_expected_no_proxy()}; proxy=disabled",
-    )
-    if active_workflow_id:
-        _set_active_daily_workflow(state, active_workflow_id, "uploading")
-    _set_latest_daily_bundle_state(
-        state,
-        status="uploading",
-        trade_date=selected_date,
-        artifact_hash=artifact_hash,
-        bundle_path=bundle_path,
-        workflow_id=active_workflow_id,
-    )
-    _write_json(state_path, state)
-    try:
-        response = _upload_daily_bundle_with_retry(
-            worker_config,
-            payload,
-            upload_path if mock_upload else None,
-            json_events=json_events,
-        )
-    except Exception as error:
-        state = _load_json(state_path)
-        if active_workflow_id:
-            _set_active_daily_workflow(state, active_workflow_id, "upload_failed", str(error))
+    def _upload_and_persist(self, result, built: dict[str, Any]) -> WorkerResult:
+        upload_path = self.mock_upload_path or self.config.reports_root / "app_worker" / f"daily_bundle_upload_{built['selected_date'].replace('-', '')}.json"
+        self._event("running", "upload_bundle", 4, 4, "uploading daily bundle")
+        self._event("running", "upload_bundle", 4, 4, f"upload target: {self.worker_config.app_base_url}{self.worker_config.daily_bundle_publish_path}; no_proxy={_expected_no_proxy()}; proxy=disabled")
+        if built["active_workflow_id"]:
+            _set_active_daily_workflow(self.state, built["active_workflow_id"], "uploading")
         _set_latest_daily_bundle_state(
-            state,
+            self.state,
+            status="uploading",
+            trade_date=built["selected_date"],
+            artifact_hash=built["artifact_hash"],
+            bundle_path=built["bundle_path"],
+            workflow_id=built["active_workflow_id"],
+        )
+        self._save_state()
+        try:
+            response = _upload_daily_bundle_with_retry(
+                self.worker_config,
+                built["payload"],
+                upload_path if self.mock_upload else None,
+                json_events=self.json_events,
+            )
+        except Exception as error:
+            self._persist_upload_failure(built, error)
+            return WorkerResult(False, f"daily bundle upload failed: {error}")
+        return self._persist_upload_success(result, built, response, upload_path)
+
+    def _persist_upload_failure(self, built: dict[str, Any], error: Exception) -> None:
+        self.state = _load_json(self.state_path)
+        if built["active_workflow_id"]:
+            _set_active_daily_workflow(self.state, built["active_workflow_id"], "upload_failed", str(error))
+        _set_latest_daily_bundle_state(
+            self.state,
             status="upload_failed",
-            trade_date=selected_date,
-            artifact_hash=artifact_hash,
-            bundle_path=bundle_path,
-            workflow_id=active_workflow_id,
+            trade_date=built["selected_date"],
+            artifact_hash=built["artifact_hash"],
+            bundle_path=built["bundle_path"],
+            workflow_id=built["active_workflow_id"],
             error=str(error),
         )
-        _write_json(state_path, state)
-        _emit_worker_event(json_events, "daily_bundle", "failed", "upload_bundle", 4, 4, str(error), error=str(error))
-        return WorkerResult(False, f"daily bundle upload failed: {error}")
-    state = _load_json(state_path)
-    archived_path = _archive_uploaded_daily_bundle(config, payload, artifact_hash, worker_config.daily_bundle_upload_archive_max)
-    state.setdefault("daily_bundle_uploads", {})[selected_date] = {
-        "artifact_hash": artifact_hash,
-        "uploaded_at": _generated_at(result.artifact),
-        "remote_result_id": response.get("daily_bundle_id") or response.get("bundle_id"),
-        "mock_upload_path": str(upload_path) if mock_upload else None,
-        "archive_path": str(archived_path) if archived_path else None,
-        "upload_response": _upload_response_summary(response),
-    }
-    _set_latest_daily_bundle_state(
-        state,
-        status="uploaded",
-        trade_date=selected_date,
-        artifact_hash=artifact_hash,
-        bundle_path=bundle_path,
-        workflow_id=active_workflow_id,
-        archive_path=str(archived_path) if archived_path else None,
-        remote_result_id=response.get("daily_bundle_id") or response.get("bundle_id"),
-        upload_response=_upload_response_summary(response),
-    )
-    _clear_active_daily_workflow(state)
-    _write_json(state_path, state)
-    response_text = json.dumps(_upload_response_summary(response), ensure_ascii=False, sort_keys=True)
-    _emit_worker_event(json_events, "daily_bundle", "completed", "upload_bundle", 4, 4, f"daily bundle uploaded: {selected_date}; upload_response={response_text}")
-    return WorkerResult(True, f"daily bundle uploaded: {selected_date} {artifact_hash}; upload_response={response_text}")
+        self._save_state()
+        self._event("failed", "upload_bundle", 4, 4, str(error), error=str(error))
+
+    def _persist_upload_success(self, result, built: dict[str, Any], response: dict[str, Any], upload_path: Path) -> WorkerResult:
+        self.state = _load_json(self.state_path)
+        archived_path = _archive_uploaded_daily_bundle(self.config, built["payload"], built["artifact_hash"], self.worker_config.daily_bundle_upload_archive_max)
+        self.state.setdefault("daily_bundle_uploads", {})[built["selected_date"]] = {
+            "artifact_hash": built["artifact_hash"],
+            "uploaded_at": _generated_at(result.artifact),
+            "remote_result_id": response.get("daily_bundle_id") or response.get("bundle_id"),
+            "mock_upload_path": str(upload_path) if self.mock_upload else None,
+            "archive_path": str(archived_path) if archived_path else None,
+            "upload_response": _upload_response_summary(response),
+        }
+        _set_latest_daily_bundle_state(
+            self.state,
+            status="uploaded",
+            trade_date=built["selected_date"],
+            artifact_hash=built["artifact_hash"],
+            bundle_path=built["bundle_path"],
+            workflow_id=built["active_workflow_id"],
+            archive_path=str(archived_path) if archived_path else None,
+            remote_result_id=response.get("daily_bundle_id") or response.get("bundle_id"),
+            upload_response=_upload_response_summary(response),
+        )
+        _clear_active_daily_workflow(self.state)
+        self._save_state()
+        response_text = json.dumps(_upload_response_summary(response), ensure_ascii=False, sort_keys=True)
+        self._event("completed", "upload_bundle", 4, 4, f"daily bundle uploaded: {built['selected_date']}; upload_response={response_text}")
+        return WorkerResult(True, f"daily bundle uploaded: {built['selected_date']} {built['artifact_hash']}; upload_response={response_text}")
+
+    def _save_state(self) -> None:
+        _write_json(self.state_path, self.state)
+
+    def _event(self, status: str, step: str, step_index: int, step_total: int, message: str, *, error: str | None = None) -> None:
+        _emit_worker_event(self.json_events, "daily_bundle", status, step, step_index, step_total, message, error=error)
 
 
 def run_holding_price_refresh(

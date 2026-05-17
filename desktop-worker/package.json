@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "electron .",
     "start": "electron .",
-    "check": "node --check src/main.js && node --check src/preload.js",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/worker-config.js && node --check src/scheduler-utils.js && node --check src/heartbeat-utils.js && node --check src/event-utils.js && node --check src/python-runner.js",
+    "test": "node --test --test-isolation=none test/*.test.js",
     "package:runtime": "..\\.venv\\Scripts\\python.exe -m PyInstaller --clean --onefile --name stock-picker-runtime scripts/runtime-entry.py --distpath resources --workpath build/pyinstaller --specpath build/pyinstaller",
     "package:win:portable": "powershell.exe -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:win:portable:raw": "electron-builder --win portable"

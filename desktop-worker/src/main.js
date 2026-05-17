@@ -4,6 +4,24 @@ const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
 const { spawn } = require('node:child_process');
+const {
+  LOG_LEVELS,
+  mergeSettingsIntoWorkerYaml,
+  normalizeAllowedWindows,
+  normalizeLogLevel,
+  parseWorkerYaml
+} = require('./worker-config');
+const { buildApiUrl, sanitizeHeartbeatMessage, workerCapabilities } = require('./heartbeat-utils');
+const { isWithinAnyWindow, localDateKey, nextWindowStart } = require('./scheduler-utils');
+const { runtimeEnv } = require('./python-runner');
+const {
+  eventLogLevel,
+  formatWorkflowEvent,
+  isJsonOnlyChunk,
+  manualStage,
+  manualStageTotal,
+  normalizeUiEvent
+} = require('./event-utils');
 
 let mainWindow;
 let tray;
@@ -18,9 +36,6 @@ let heartbeatTimer = null;
 const retryState = new Map();
 const notificationState = new Map();
 const automaticJobState = loadAutomaticJobState();
-
-const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
-const DEFAULT_DAILY_WINDOWS = ['16:00-24:00', '00:00-10:00'];
 
 const AUTOMATIC_JOBS = {
   daily_bundle: {
@@ -71,7 +86,6 @@ const MANUAL_STAGE_DEFINITIONS = {
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const desktopWorkerRoot = path.resolve(__dirname, '..');
-const DEFAULT_NO_PROXY = '127.0.0.1,localhost,101.34.212.101';
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -228,124 +242,12 @@ function loadSettings() {
 
 function saveSettings(settings) {
   ensurePortableFiles();
-  const yaml = [
-    `app_base_url: ${settings.appBaseUrl || 'http://127.0.0.1:3000'}`,
-    `storage_config_path: ${settings.storagePath || configPaths().storage}`,
-    'worker_id: local-worker',
-    'worker_token_env: APP_API_TOKEN',
-    'tushare_token_env: TUSHARE_TOKEN',
-    `log_level: ${normalizeLogLevel(settings.logLevel || 'info')}`,
-    `poll_interval_seconds: ${Number(settings.stockAnalysisPollSeconds || 15)}`,
-    `holding_price_poll_interval_seconds: ${Number(settings.holdingPricePollSeconds || 300)}`,
-    `worker_status_interval_seconds: ${Number(settings.workerStatusIntervalSeconds || 30)}`,
-    `daily_bundle_check_interval_seconds: ${Number(settings.dailyBundleCheckSeconds || 900)}`,
-    `earliest_daily_publish_time: "${settings.earliestDailyPublishTime || '16:30'}"`,
-    'api_paths:',
-    '  analysis_claim: /api/worker/analysis-requests/claim',
-    '  analysis_result: /api/worker/analysis-requests/{requestId}/result',
-    '  daily_bundle_publish: /api/publish/daily-bundles',
-    '  holding_watchlist: /api/worker/holding-prices/watchlist',
-    '  holding_prices: /api/worker/holding-prices',
-    '  worker_status: /api/worker/status',
-    'tasks:',
-    '  stock_analysis:',
-    `    enabled: ${settings.stockAnalysisEnabled !== false}`,
-    `    poll_interval_seconds: ${Number(settings.stockAnalysisPollSeconds || 15)}`,
-    '  daily_bundle:',
-    `    enabled: ${settings.dailyBundleEnabled !== false}`,
-    `    check_interval_seconds: ${Number(settings.dailyBundleCheckSeconds || 900)}`,
-    `    earliest_publish_time: "${settings.earliestDailyPublishTime || '16:30'}"`,
-    '    allowed_windows:',
-    ...normalizeAllowedWindows(settings.dailyBundleAllowedWindows).map((item) => `      - "${item}"`),
-    '    upload_archive_max: 20',
-    '  holding_prices:',
-    `    enabled: ${settings.holdingPriceEnabled !== false}`,
-    `    poll_interval_seconds: ${Number(settings.holdingPricePollSeconds || 300)}`,
-    ''
-  ].join('\n');
+  const paths = configPaths();
+  const original = fs.readFileSync(paths.appWorker, 'utf8');
+  const yaml = mergeSettingsIntoWorkerYaml(original, settings, paths.storage);
   fs.writeFileSync(configPaths().appWorker, yaml, 'utf8');
   restartWorkerIfRunning();
   return loadSettings();
-}
-
-function parseWorkerYaml(text) {
-  const config = {};
-  let section = '';
-  let nested = '';
-  let listKey = '';
-  for (const rawLine of text.split(/\r?\n/)) {
-    if (!rawLine.trim() || rawLine.trim().startsWith('#')) continue;
-    const indent = rawLine.match(/^\s*/)[0].length;
-    const line = rawLine.trim();
-    if (line.startsWith('- ') && listKey) {
-      const item = line.slice(2).trim().replace(/^["']|["']$/g, '');
-      config[listKey] = [...(config[listKey] || []), item];
-      continue;
-    }
-    listKey = '';
-    if (!line.includes(':')) continue;
-    const [key, ...rest] = line.split(':');
-    const value = rest.join(':').trim().replace(/^["']|["']$/g, '');
-    if (indent === 0 && !value) {
-      section = key.trim();
-      nested = '';
-      continue;
-    }
-    if (indent === 2 && !value) {
-      nested = key.trim();
-      continue;
-    }
-    if (!value && section === 'tasks' && nested && indent >= 4) {
-      listKey = taskKey(nested, key.trim());
-      config[listKey] = [];
-      continue;
-    }
-    const parsed = parseYamlValue(value);
-    if (section === 'api_paths' && indent >= 2) config[apiPathKey(key.trim())] = parsed;
-    else if (section === 'tasks' && nested && indent >= 4) config[taskKey(nested, key.trim())] = parsed;
-    else if (indent === 0) config[key.trim()] = parsed;
-  }
-  return config;
-}
-
-function parseYamlValue(value) {
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  if (/^\d+(\.\d+)?$/.test(value)) return Number(value);
-  return value;
-}
-
-function apiPathKey(key) {
-  return {
-    analysis_claim: 'analysis_claim_path',
-    analysis_result: 'analysis_result_path_template',
-    daily_bundle_publish: 'daily_bundle_publish_path',
-    holding_watchlist: 'holding_watchlist_path',
-    holding_prices: 'holding_prices_path',
-    worker_status: 'worker_status_path'
-  }[key] || key;
-}
-
-function taskKey(task, key) {
-  const prefix = { stock_analysis: 'stock_analysis', daily_bundle: 'daily_bundle', holding_prices: 'holding_price' }[task] || task;
-  if (key === 'enabled') return `${prefix}_enabled`;
-  if (task === 'stock_analysis' && key === 'poll_interval_seconds') return 'poll_interval_seconds';
-  if (task === 'daily_bundle' && key === 'check_interval_seconds') return 'daily_bundle_check_interval_seconds';
-  if (task === 'daily_bundle' && key === 'earliest_publish_time') return 'earliest_daily_publish_time';
-  if (task === 'daily_bundle' && key === 'allowed_windows') return 'daily_bundle_allowed_windows';
-  if (task === 'holding_prices' && key === 'poll_interval_seconds') return 'holding_price_poll_interval_seconds';
-  return `${prefix}_${key}`;
-}
-
-function normalizeLogLevel(value) {
-  const level = String(value || 'info').trim().toLowerCase();
-  return LOG_LEVELS[level] ? level : 'info';
-}
-
-function normalizeAllowedWindows(value) {
-  const input = Array.isArray(value) ? value : String(value || '').split(',');
-  const windows = input.map((item) => String(item || '').trim()).filter(Boolean);
-  return windows.length ? windows : DEFAULT_DAILY_WINDOWS;
 }
 
 function pythonCommand(args, eventChannel, taskType, manualTaskType = null) {
@@ -365,7 +267,7 @@ function pythonCommand(args, eventChannel, taskType, manualTaskType = null) {
         stageKey: 'starting',
         stageName: 'Starting',
         stageIndex: 0,
-        stageTotal: manualStageTotal(manualTaskType),
+        stageTotal: manualStageTotal(manualTaskType, MANUAL_STAGE_DEFINITIONS),
         message: `stock-picker ${args.join(' ')}`,
         error: null,
         startedAt: new Date().toISOString(),
@@ -416,44 +318,17 @@ function pythonCommand(args, eventChannel, taskType, manualTaskType = null) {
   });
 }
 
-function runtimeEnv(localEnv) {
-  const noProxy = mergeNoProxy(localEnv.NO_PROXY || process.env.NO_PROXY, localEnv.no_proxy || process.env.no_proxy);
-  const merged = {
-    ...process.env,
-    ...localEnv,
-    PYTHONUNBUFFERED: '1',
-    NO_PROXY: noProxy,
-    no_proxy: noProxy
-  };
-  for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) {
-    delete merged[key];
-  }
-  return merged;
-}
-
-function mergeNoProxy(...values) {
-  const entries = [];
-  for (const value of [...values, DEFAULT_NO_PROXY]) {
-    if (!value) continue;
-    for (const item of String(value).split(',')) {
-      const trimmed = item.trim();
-      if (trimmed && !entries.includes(trimmed)) entries.push(trimmed);
-    }
-  }
-  return entries.join(',');
-}
-
 function parseJsonEvents(text, context = null) {
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim().startsWith('{')) continue;
     try {
       const parsed = JSON.parse(line);
-      const uiEvent = normalizeUiEvent(parsed, context);
+      const uiEvent = normalizeUiEvent(parsed, context, AUTOMATIC_JOBS, MANUAL_STAGE_DEFINITIONS);
       const level = eventLogLevel(uiEvent);
       const shouldEmitLog = uiEvent.ui_log !== false && shouldLog(level);
       mainWindow?.webContents.send('workflow-event', { ...uiEvent, ui_log: shouldEmitLog });
       if (uiEvent.ui_log !== false) {
-        writeLog(level, formatWorkflowEvent(uiEvent), { emitUi: true });
+        writeLog(level, formatWorkflowEvent(uiEvent, formatDateTime()), { emitUi: true });
         if (shouldEmitLog && uiEvent.ui_notify !== false) notifyWorkflowEvent(uiEvent);
       }
       if (context?.manualTaskType) updateManualTaskFromEvent(uiEvent, context);
@@ -474,146 +349,18 @@ function parseJsonEvents(text, context = null) {
   }
 }
 
-function formatWorkflowEvent(event) {
-  const task = event.task_type || event.workflow_id || 'workflow';
-  const step = event.step ? ` ${event.step}` : '';
-  const progress = event.step_index && event.step_total ? ` ${event.step_index}/${event.step_total}` : '';
-  const status = event.status || event.event || 'event';
-  const message = event.message || '';
-  return `[${formatDateTime()}] ${task}${step}${progress} ${status}: ${message}\n`;
-}
-
-function eventLogLevel(event) {
-  const status = String(event.status || event.event || '').toLowerCase();
-  if (status.includes('failed')) return 'error';
-  if (status.includes('retry')) return 'warn';
-  return 'info';
-}
-
-function normalizeUiEvent(event, context) {
-  if (!context?.manualTaskType) {
-    const taskType = event.task_type || event.workflow_id || context?.taskType;
-    const status = String(event.status || event.event || '').toLowerCase();
-    if (AUTOMATIC_JOBS[taskType]?.mode === 'periodic' && !status.includes('failed')) {
-      return { ...event, ui_log: false, ui_notify: false };
-    }
-    return event;
-  }
-  const mapped = mapManualStage(context.manualTaskType, event);
-  if (!mapped) return { ...event, ui_log: false };
-  const status = mapped.status || event.status || event.event || 'running';
-  const stageChanged = context.lastStageKey !== mapped.stageKey;
-  const terminal = /completed|failed|skipped/.test(String(status)) || /completed|failed/.test(String(event.event || ''));
-  const progressLog = shouldLogManualProgress(event, context);
-  context.lastStageKey = mapped.stageKey;
-  return {
-    ...event,
-    task_type: context.manualTaskType,
-    step: mapped.stageKey,
-    step_index: mapped.stageIndex,
-    step_total: mapped.stageTotal,
-    status,
-    message: mapped.message || event.message || mapped.stageName,
-    ui_log: stageChanged || terminal || progressLog,
-    ui_notify: stageChanged || terminal
-  };
-}
-
-function shouldLogManualProgress(event, context) {
-  if (context.manualTaskType !== 'sync') return false;
-  const eventName = String(event.event || '');
-  if (eventName !== 'step_progress') return false;
-  const message = String(event.message || '');
-  const now = Date.now();
-  if (message && message !== context.lastProgressMessage) {
-    context.lastProgressMessage = message;
-    context.lastProgressLogAt = now;
-    return true;
-  }
-  if (now - context.lastProgressLogAt >= 10000) {
-    context.lastProgressLogAt = now;
-    return true;
-  }
-  return false;
-}
-
-function mapManualStage(taskType, event) {
-  const step = String(event.step || '');
-  const status = String(event.status || event.event || '');
-  if (taskType === 'sync') {
-    if (step === 'upload_bundle') return manualStage(taskType, 'upload_bundle', event);
-    if (step === 'build_bundle') return manualStage(taskType, 'build_daily_bundle', event);
-    if (step === 'sync_latest' || step === 'sync_dry_run' || /sync/.test(step)) return manualStage(taskType, 'sync_latest', event);
-    if (step === 'quality_check') return manualStage(taskType, 'quality_check', event);
-    if (step === 'compute_candidate_002_factors') return manualStage(taskType, 'compute_candidate_002_factors', event);
-    if (step === 'rank_candidate_002' || step === 'backtest_candidate_002' || step === 'create_snapshot') return manualStage(taskType, 'rank_candidate_002', event);
-    if (step === 'build_daily_bundle' || /build/.test(step)) return manualStage(taskType, 'build_daily_bundle', event);
-    if (/failed|completed/.test(status)) return terminalManualStage(taskType, event);
-    return null;
-  }
-  if (taskType === 'stock_analysis') {
-    if (step === 'validate_symbol') return manualStage(taskType, 'validate_symbol', event);
-    if (step === 'resolve_factor_run') return manualStage(taskType, 'resolve_factor_run', event);
-    if (step === 'analyze_stock') return manualStage(taskType, 'analyze_stock', event);
-    if (step === 'write_summary' || /completed|failed/.test(status)) return manualStage(taskType, 'write_summary', event);
-    return null;
-  }
-  if (taskType === 'holding_analysis') {
-    if (step === 'load_watchlist') return manualStage(taskType, 'load_watchlist', event);
-    if (step === 'refresh_quotes') return manualStage(taskType, 'refresh_quotes', event);
-    if (step === 'upload_prices' || /completed|failed/.test(status)) return manualStage(taskType, 'upload_prices', event);
-    return null;
-  }
-  return null;
-}
-
-function manualStage(taskType, stageKey, event = {}) {
-  const stages = MANUAL_STAGE_DEFINITIONS[taskType] || [];
-  const index = stages.findIndex(([key]) => key === stageKey);
-  return {
-    stageKey,
-    stageName: index >= 0 ? stages[index][1] : stageKey,
-    stageIndex: index >= 0 ? index + 1 : 0,
-    stageTotal: stages.length,
-    status: event.status || event.event || 'running',
-    message: event.message
-  };
-}
-
-function terminalManualStage(taskType, event = {}) {
-  const stages = MANUAL_STAGE_DEFINITIONS[taskType] || [];
-  const [stageKey, stageName] = stages[stages.length - 1] || ['finished', 'Finished'];
-  return {
-    stageKey,
-    stageName,
-    stageIndex: stages.length,
-    stageTotal: stages.length,
-    status: event.status || event.event || 'completed',
-    message: event.message
-  };
-}
-
 function updateManualTaskFromEvent(event, context) {
   if (event.ui_log === false) return;
   setManualTaskState({
     taskType: context.manualTaskType,
     status: event.status || event.event || manualTaskState.status,
     stageKey: event.step || manualTaskState.stageKey,
-    stageName: manualStage(context.manualTaskType, event.step || '').stageName || event.step || manualTaskState.stageName,
+    stageName: manualStage(context.manualTaskType, event.step || '', {}, MANUAL_STAGE_DEFINITIONS).stageName || event.step || manualTaskState.stageName,
     stageIndex: event.step_index || manualTaskState.stageIndex,
     stageTotal: event.step_total || manualTaskState.stageTotal,
     message: event.message || manualTaskState.message,
     error: event.error || manualTaskState.error
   });
-}
-
-function manualStageTotal(taskType) {
-  return (MANUAL_STAGE_DEFINITIONS[taskType] || []).length;
-}
-
-function isJsonOnlyChunk(text) {
-  const lines = text.split(/\r?\n/).filter((line) => line.trim());
-  return lines.length > 0 && lines.every((line) => line.trim().startsWith('{'));
 }
 
 function notifyWorkflowEvent(event) {
@@ -688,11 +435,6 @@ function appendUiLog(message, level = 'info') {
 function formatDateTime(date = new Date()) {
   const pad = (value) => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
-function localDateKey(date = new Date()) {
-  const pad = (value) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 function readRecentLogs(maxBytes = 40000) {
@@ -819,7 +561,12 @@ function nextDailyRunAt(name, settings, initial) {
   const today = localDateKey();
   const state = automaticJobState[name] || {};
   const windows = normalizeAllowedWindows(settings.dailyBundleAllowedWindows);
-  if (state.lastSuccessDate === today) return nextWindowStart(windows, new Date(startOfLocalDay(addDays(new Date(), 1)).getTime() - 1));
+  if (state.lastSuccessDate === today) {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+    return nextWindowStart(windows, new Date(tomorrow.getTime() - 1));
+  }
   const now = new Date();
   if (isWithinAnyWindow(now, windows)) return new Date(Date.now() + (initial ? 1000 : normalIntervalSeconds(AUTOMATIC_JOBS[name], settings) * 1000));
   return nextWindowStart(windows, now);
@@ -885,12 +632,6 @@ function shouldEmitThrottledLog(key, throttleMs) {
   return true;
 }
 
-function buildApiUrl(baseUrl, apiPath) {
-  const base = String(baseUrl || '').replace(/\/+$/, '');
-  const suffix = String(apiPath || '').startsWith('/') ? apiPath : `/${apiPath || ''}`;
-  return `${base}${suffix}`;
-}
-
 function postJson(url, payload, token) {
   return new Promise((resolve, reject) => {
     let parsed;
@@ -947,27 +688,12 @@ function updateHeartbeatState(status, error) {
   });
 }
 
-function workerCapabilities(settings) {
-  return {
-    daily_bundle: Boolean(settings.dailyBundleEnabled),
-    stock_analysis: Boolean(settings.stockAnalysisEnabled),
-    holding_prices: Boolean(settings.holdingPriceEnabled)
-  };
-}
-
 function workerVersion() {
   try {
     return app.getVersion();
   } catch (_) {
     return '0.1.0';
   }
-}
-
-function sanitizeHeartbeatMessage(message) {
-  return String(message || '')
-    .replace(/[A-Za-z]:\\[^\s"'<>]+/g, '[local-path]')
-    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+/gi, 'Bearer [token]')
-    .slice(0, 180);
 }
 
 function runAnalysisPoll() {
@@ -1050,58 +776,6 @@ function summarizeProcessResult(result) {
     if (!line.startsWith('{') && !line.startsWith('[event]')) return line.slice(0, 500);
   }
   return '';
-}
-
-function parseTimeOfDay(value) {
-  const normalized = String(value || '00:00').trim();
-  if (normalized === '24:00') return 24 * 60;
-  const [hourRaw, minuteRaw] = normalized.split(':');
-  const hour = Math.max(0, Math.min(23, Number(hourRaw) || 0));
-  const minute = Math.max(0, Math.min(59, Number(minuteRaw) || 0));
-  return hour * 60 + minute;
-}
-
-function parseWindow(value) {
-  const [startRaw, endRaw] = String(value).split('-');
-  return { start: parseTimeOfDay(startRaw), end: parseTimeOfDay(endRaw || startRaw) };
-}
-
-function minutesSinceLocalMidnight(date) {
-  return date.getHours() * 60 + date.getMinutes();
-}
-
-function isWithinAnyWindow(date, windows) {
-  const minute = minutesSinceLocalMidnight(date);
-  return normalizeAllowedWindows(windows).some((item) => {
-    const window = parseWindow(item);
-    if (window.start <= window.end) return minute >= window.start && minute < window.end;
-    return minute >= window.start || minute < window.end;
-  });
-}
-
-function nextWindowStart(windows, fromDate) {
-  const candidates = [];
-  for (let dayOffset = 0; dayOffset <= 2; dayOffset += 1) {
-    const day = startOfLocalDay(addDays(fromDate, dayOffset));
-    for (const item of normalizeAllowedWindows(windows)) {
-      const window = parseWindow(item);
-      const candidate = new Date(day.getTime() + window.start * 60 * 1000);
-      if (candidate > fromDate) candidates.push(candidate);
-    }
-  }
-  return candidates.sort((left, right) => left.getTime() - right.getTime())[0] || new Date(Date.now() + 60 * 1000);
-}
-
-function startOfLocalDay(date) {
-  const output = new Date(date);
-  output.setHours(0, 0, 0, 0);
-  return output;
-}
-
-function addDays(date, days) {
-  const output = new Date(date);
-  output.setDate(output.getDate() + days);
-  return output;
 }
 
 function retryDelaySeconds(taskName, status) {
